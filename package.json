@@ -43,10 +43,7 @@
       "!node_modules/.cache",
       "!node_modules/electron/**",
       "!node_modules/electron-builder/**",
-      "!**/*.map",
-      "!**/test/**",
-      "!**/tests/**",
-      "!**/__tests__/**"
+      "!**/*.map"
     ],
     "mac": {
       "category": "public.app-category.productivity",

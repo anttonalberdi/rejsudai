@@ -107,6 +107,23 @@ The build sets `asar: false`. The automation runs as a *plain Node* child
 process, and plain Node cannot read files inside an asar archive — `bot.js` and
 its dependencies have to exist as real files on disk.
 
+### Why the `files` list prunes almost nothing
+
+`node_modules` is bundled wholesale on purpose. The obvious slimming globs —
+`!**/test/**`, `!**/tests/**`, `!**/__tests__/**` — are **not** in the list, and
+must not be added back: Playwright ships real runtime code under such a path
+(`playwright/lib/mcp/test/`), which `playwright/lib/program.js` requires at the
+top. Pruning it saves 56 KB and breaks every invocation of
+`playwright/cli.js` — including the Chromium download the app runs on first
+launch, which then fails with `Cannot find module './mcp/test/testBackend'`.
+
+A packaged build is the only place this shows up (`require('playwright')` itself
+is unaffected, so the automation runs fine once a browser exists), and only on a
+machine with no Chromium in Playwright's shared cache — anywhere `playwright
+install` has ever run, `browsers.status()` finds that copy and the download
+button is never pressed. Check a change to `files` against a machine that has
+neither, not against a development one.
+
 ## The CLI still works
 
 `bot.js` is untouched as an automation and still runs standalone for debugging:

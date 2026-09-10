@@ -24,6 +24,25 @@ _Nothing yet._
 
 ---
 
+## [1.0.1] — 2026-09-10
+
+_Fixes the first-run Chromium download, which was broken in both 1.0.0 `.dmg`s._
+
+### Fixed
+
+- **"Download Chromium…" failed with `exit code 1`.** The packaging filter
+  `!**/test/**` stripped `node_modules/playwright/lib/mcp/test/` — 56 KB of
+  Playwright's own runtime code, required at the top of its CLI — so every
+  invocation of `playwright/cli.js` in a packaged build died with
+  `Cannot find module './mcp/test/testBackend'` before it reached the network.
+  Both `.dmg`s were affected; it only surfaced on a Mac with no Chromium in
+  Playwright's shared cache, since anywhere `playwright install` had ever run
+  the app reused that copy and never pressed the button.
+- A failed Chromium download now reports the line that names the cause instead
+  of only its exit code.
+
+---
+
 ## [1.0.0] — 2026-09-10
 
 _The first release: the indfak2 automation as a macOS app._
@@ -173,4 +192,5 @@ history is in the git log, from the initial commit through
 That CLI still works — see [`DEVELOPING.md`](DEVELOPING.md).
 
 <!-- Add one link per release as it is tagged. -->
+[1.0.1]: https://github.com/anttonalberdi/rejsudai/releases/tag/v1.0.1
 [1.0.0]: https://github.com/anttonalberdi/rejsudai/releases/tag/v1.0.0
