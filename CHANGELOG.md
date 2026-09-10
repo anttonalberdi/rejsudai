@@ -19,7 +19,11 @@ file.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+
+- Removed the developer-specific project alias from application defaults,
+  documentation, and recorded browser selectors. New installs start with an
+  empty alias library.
 
 ---
 
@@ -45,7 +49,7 @@ _The first release: the indfak2 automation as a macOS app._
   (`app/lib/screencast.js`), with an expand toggle and draggable, remembered
   pane sizes.
 - **Status line** above the log names the step in progress (*Selecting the
-  project alias 1240351001*, *Searching the card transactions for CWT*), so a
+  project alias*, *Searching the card transactions*), so a
   stall is visible while it happens.
 - Live log of the run, with every credential value replaced by `«redacted»`
   before the pane ever sees it.

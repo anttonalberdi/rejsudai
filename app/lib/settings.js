@@ -13,16 +13,18 @@ const FILE = () => path.join(app.getPath('userData'), 'settings.json');
 // automation used to run in. The app always passes explicit values, so these
 // are what a fresh install starts from.
 const DEFAULTS = {
-  receiptsInbox: path.join(os.homedir(), 'claude_vm', 'receipts-inbox'),
-  claimsOutput: os.homedir(),
+  receiptsInbox: path.join(os.homedir(), 'Rejsudai', 'receipts-inbox'),
+  claimsOutput: path.join(os.homedir(), 'Rejsudai', 'claims-output'),
   // The alias library: [{ name, code }]. expenseAlias names the entry the
   // New settlement page starts on. Seeded on first read — see read().
   aliases: [],
   // Set the first time settings are written, so the seeding below happens once
   // and an emptied library stays empty.
   aliasesSeeded: false,
-  expenseAlias: '1240351001',
-  expenseAliasOption: '1240351001 - InsituMicroSeq/Villum/ salary and run',
+  // Each installation starts without an alias. Add one on the Aliases tab;
+  // a project code must never be distributed as an application default.
+  expenseAlias: '',
+  expenseAliasOption: '',
   expenseType: '1 -Settlement',
   expensePurpose: '2 - Outside Denmark',
   corporateCard:
@@ -95,7 +97,7 @@ function normalizeAliases(list, { strict = false } = {}) {
   return out;
 }
 
-// "1240351001 - Some Project/Funder/ salary and run" → the part after the code,
+// "project-code - Project/funder description" → the part after the code,
 // which is the closest thing an install from before the library has to a name.
 function nameFromOption(option) {
   const m = /^\s*[A-Za-z0-9._]+\s*-\s*(.+)$/.exec(String(option || ''));

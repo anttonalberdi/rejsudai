@@ -101,7 +101,7 @@ something unexpected. Settings has a toggle to run it hidden.
 
 The projects you book costs on live on the **Aliases** tab, between Settlements
 and Settings. Each entry is a short name of your own plus the alias code indfak2
-knows it by (`1240351001`). The New settlement page picks from this list, and the
+knows it by (`your-alias-code`). The New settlement page picks from this list, and the
 marked entry is the one it starts on. **Save aliases** is separate from **Save
 settings**, so the two pages never overwrite each other.
 
@@ -137,7 +137,7 @@ any two panes to resize them (double-click one to put it back, or focus it and
 use the arrow keys); the sizes are remembered between launches.
 
 Above the log, a status line names the step in progress — *Selecting the project
-alias 1240351001*, *Searching the card transactions for CWT* — so a stall is
+alias*, *Searching the card transactions* — so a stall is
 visible while it is happening.
 
 Each settlement ends with a status (queued / running / done / submitted /
@@ -168,9 +168,9 @@ A failure is reported as four things rather than a stack trace: **what went
 wrong**, **which step it happened in**, **the evidence**, and **what to fix**.
 
 ```
-✖ Alias "1241143252" does not exist in indfak2, or this account cannot use it.
-  While: selecting the project alias 1241143252
-  Detail: Searching for "1241143252" returned: 1240351001 - InsituMicroSeq/Hologenomics
+✖ Alias "your-alias-code" does not exist in indfak2, or this account cannot use it.
+  While: selecting the project alias your-alias-code
+  Detail: Searching for "your-alias-code" returned no accessible aliases
   → Fix the alias on the settlement, or set the right default alias in Settings.
 ```
 

@@ -101,8 +101,8 @@ node delete-draft.js "draft name substring"   # clean up after a crashed run
 Those read credentials and paths from `.env` as they always did. `CLAUDE.md`
 documents the automation's behaviour, settlement logic, and edge cases in full.
 
-`run-pending.sh` is the original Linux-era batch script (it still has
-`/home/anttonalberdi` paths hardcoded); the app's Process button replaces it.
+`run-pending.sh` is the original Linux-era batch script; it runs relative to
+the checkout, while the app's Process button replaces it for normal use.
 
 ## How the app wraps the automation
 

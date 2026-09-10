@@ -34,7 +34,7 @@ node bot.js <settlement_folder>
 - The folder is named after the settlement and nothing else. What its name cannot
   carry — the project alias, and the settlement name exactly as it was typed —
   lives in a `.rejsudai.json` written beside the receipts by the desktop app:
-  `{ "name": "AI Subscription Fees", "alias": "1240351001" }`. A folder made by
+  `{ "name": "AI Subscription Fees", "alias": "your-alias-code" }`. A folder made by
   hand has no such file: its own name becomes the settlement name
   (`ai_subscription_fees` → `AI Subscription Fees`) and the alias falls back to
   `EXPENSE_ALIAS` / `EXPENSE_ALIAS_OPTION`.
@@ -178,10 +178,10 @@ clicking Delete unless the selected-row count exactly matches the rows found.
 | `INDFAK_PASSWORD` | — | Login password |
 | `TOTP_SECRET` | — | Base32 TOTP secret (if omitted, prompts interactively) |
 | `ANTHROPIC_API_KEY` | — | Claude API key |
-| `RECEIPTS_INBOX` | `~/macos_shared/receipts-inbox` | Where to look for input folders/files |
-| `CLAIMS_OUTPUT` | `~/macos_shared/claims-output` | Where to write processed output |
-| `EXPENSE_ALIAS` | `1240351001` | Default project alias code |
-| `EXPENSE_ALIAS_OPTION` | `1240351001 - InsituMicroSeq/...` | Full alias label for pinned-list match |
+| `RECEIPTS_INBOX` | `~/Rejsudai/receipts-inbox` | Where to look for input folders/files |
+| `CLAIMS_OUTPUT` | `~/Rejsudai/claims-output` | Where to write processed output |
+| `EXPENSE_ALIAS` | unset | Default project alias code; required for a hand-created folder |
+| `EXPENSE_ALIAS_OPTION` | unset | Optional full alias label for pinned-list matching |
 | `EXPENSE_TYPE` | `1 -Settlement` | Dropdown partial match for Type field (non-travel folders; trips auto-select Type 2) |
 | `EXPENSE_PURPOSE` | `2 - Outside Denmark` | Dropdown partial match for Purpose field (non-travel; trips derive it from the destination) |
 | `CORPORATE_CARD` | `SEB Eurocard (a Mastercard, issued by SEB)` | Card description used by the settlement plan to tell corporate-card receipts from out-of-pocket ones |

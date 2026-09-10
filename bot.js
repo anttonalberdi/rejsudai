@@ -10,10 +10,14 @@ const path = require('path');
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 // --- CONFIG (overridable via env vars) ---
-const RECEIPTS_INBOX       = process.env.RECEIPTS_INBOX       || '/home/anttonalberdi/macos_shared/receipts-inbox';
-const CLAIMS_OUTPUT        = process.env.CLAIMS_OUTPUT        || '/home/anttonalberdi/macos_shared/claims-output';
-const PROJECT_ALIAS        = process.env.EXPENSE_ALIAS        || '1240351001';
-const PROJECT_ALIAS_OPTION = process.env.EXPENSE_ALIAS_OPTION || '1240351001 - InsituMicroSeq/Villum/ salary and run';
+const DEFAULT_DATA_DIR     = path.join(os.homedir(), 'Rejsudai');
+const RECEIPTS_INBOX       = process.env.RECEIPTS_INBOX       || path.join(DEFAULT_DATA_DIR, 'receipts-inbox');
+const CLAIMS_OUTPUT        = process.env.CLAIMS_OUTPUT        || path.join(DEFAULT_DATA_DIR, 'claims-output');
+// A project alias is specific to each user's indfak2 account. It is deliberately
+// unset by default: configure EXPENSE_ALIAS for CLI runs, or add an alias in the
+// desktop app before creating a settlement.
+const PROJECT_ALIAS        = process.env.EXPENSE_ALIAS        || '';
+const PROJECT_ALIAS_OPTION = process.env.EXPENSE_ALIAS_OPTION || '';
 const EXPENSE_TYPE         = process.env.EXPENSE_TYPE         || '1 -Settlement';
 const EXPENSE_PURPOSE      = process.env.EXPENSE_PURPOSE      || '2 - Outside Denmark';
 // Describes the corporate card so Claude can tell card-paid receipts (which appear
@@ -297,7 +301,7 @@ function failure(title, { detail = null, hint = null } = {}) {
   return err;
 }
 
-// "getByRole('link', { name: /^1241143252/ })" → 'the "1241143252" link'.
+// "getByRole('link', { name: /^project-code/ })" → 'the "project-code" link'.
 // Playwright's call log names the locator it gave up on, which is the only
 // clue about which thing on the page never appeared.
 function describeTarget(text) {
@@ -1096,6 +1100,12 @@ async function fillNewDraft(page, inner, invoice, opts = {}) {
   const expenseName = opts.draftName || `* ${invoice.vendor} - ${invoice.date.slice(0, 7)}`;
   const travel      = opts.travel    || null;
 
+  if (!alias) {
+    throw failure('No project alias is configured.', {
+      hint: 'Add an alias in the app, or set EXPENSE_ALIAS before running the CLI.',
+    });
+  }
+
   setStep('draft', `creating the draft "${expenseName}"`);
   await inner.getByRole('textbox', { name: 'Name *' }).fill(expenseName);
   // Trips use Type 2 ("Travel settlements (days,expenses,transp.)"), which
@@ -1111,8 +1121,9 @@ async function fillNewDraft(page, inner, invoice, opts = {}) {
   await new Promise(r => setTimeout(r, 300));
 
   let aliasOption;
-  if (opts.alias) {
-    // Folder mode: always type alias code and pick first matching link from search results
+  if (opts.alias || !PROJECT_ALIAS_OPTION) {
+    // Search by code when the caller supplied it, or no pinned-list label was
+    // configured. This is the normal path for a new CLI installation.
     const searchResponse = page.waitForResponse(r => r.url().includes('dimension_usages'), { timeout: 15000 });
     await aliasField.fill(alias);
     await aliasField.evaluate(el => el.dispatchEvent(new Event('input', { bubbles: true })));
@@ -1138,7 +1149,7 @@ async function fillNewDraft(page, inner, invoice, opts = {}) {
     await aliasOption.waitFor({ timeout: 10000 });
   } catch {
     const offered = await aliasSearchResults(inner);
-    const wanted = opts.alias ? `Alias "${alias}"` : `Alias "${PROJECT_ALIAS_OPTION}"`;
+    const wanted = `Alias "${alias}"`;
     throw failure(`${wanted} does not exist in indfak2, or this account cannot use it.`, {
       detail: offered.length
         ? `Searching for "${alias}" returned: ${offered.join(' · ')}`

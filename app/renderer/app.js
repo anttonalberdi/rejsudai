@@ -952,7 +952,7 @@ function aliasRow({ name = '', code = '' } = {}) {
 
   for (const [cls, placeholder, value] of [
     ['alias-name', 'Short name', name],
-    ['mono alias-code', '1240351001', code],
+    ['mono alias-code', 'your-alias-code', code],
   ]) {
     const input = el('input', cls);
     input.type = 'text';

@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cd /home/anttonalberdi/rejsudai-bot
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+cd "$SCRIPT_DIR"
 
 # Load RECEIPTS_INBOX from .env if present
-RECEIPTS_INBOX="${RECEIPTS_INBOX:-/home/anttonalberdi/macos_shared/receipts-inbox}"
+RECEIPTS_INBOX="${RECEIPTS_INBOX:-$SCRIPT_DIR/receipts-inbox}"
 if [ -f .env ]; then
   INBOX_FROM_ENV=$(grep -E '^RECEIPTS_INBOX=' .env | cut -d= -f2- | tr -d '"' | tr -d "'" || true)
   if [ -n "${INBOX_FROM_ENV:-}" ]; then
