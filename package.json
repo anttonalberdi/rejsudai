@@ -1,0 +1,73 @@
+{
+  "name": "rejsud",
+  "productName": "Rejsud",
+  "version": "1.0.0",
+  "description": "Desktop app for filing travel/expense settlements into indfak2.dk",
+  "main": "app/main.js",
+  "license": "ISC",
+  "private": true,
+  "scripts": {
+    "dev": "unset ELECTRON_RUN_AS_NODE; electron .",
+    "dist": "electron-builder --mac",
+    "bot": "node bot.js",
+    "playwright:install": "playwright install chromium"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.104.1",
+    "dotenv": "^17.4.2",
+    "heic-convert": "^2.1.0",
+    "otpauth": "^9.5.1",
+    "playwright": "^1.60.0"
+  },
+  "devDependencies": {
+    "electron": "^44.3.0",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "dk.ku.rejsud",
+    "productName": "Rejsud",
+    "copyright": "Copyright \u00a9 2026",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "asar": false,
+    "files": [
+      "app/**/*",
+      "bot.js",
+      "delete-draft.js",
+      "inspect-draft.js",
+      "setup-totp.js",
+      "build/icon.png",
+      "node_modules/**/*",
+      "!node_modules/.cache",
+      "!node_modules/electron/**",
+      "!node_modules/electron-builder/**",
+      "!**/*.map",
+      "!**/test/**",
+      "!**/tests/**",
+      "!**/__tests__/**"
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ],
+      "icon": "build/icon.png",
+      "darkModeSupport": true,
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "identity": null
+    },
+    "dmg": {
+      "title": "Rejsud ${version}"
+    }
+  }
+}

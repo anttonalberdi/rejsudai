@@ -1,0 +1,17 @@
+# Secrets — never commit
+.env
+.env.local
+
+# Dependencies / build output
+node_modules/
+dist/
+out/
+
+# macOS
+.DS_Store
+
+# Local agent config (this app is meant to run without an agent)
+.claude/settings.local.json
+
+# Source zip — contains a .env with real credentials
+rejsud-bot.zip

@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self';" />
+  <title>Rejsud</title>
+  <link rel="stylesheet" href="app.css" />
+</head>
+<body>
+  <header class="titlebar">
+    <div class="tabs" role="tablist">
+      <button class="tab is-active" data-view="run" role="tab">Settlements</button>
+      <button class="tab" data-view="settings" role="tab">Settings</button>
+    </div>
+    <div class="titlebar-right">
+      <span id="browser-badge" class="badge" hidden></span>
+    </div>
+  </header>
+
+  <!-- ============================ RUN VIEW ============================ -->
+  <main id="view-run" class="view">
+    <section class="panel panel-list">
+      <div class="panel-head">
+        <div>
+          <h2>Pending settlements</h2>
+          <p id="inbox-path" class="subtle mono"></p>
+        </div>
+        <div class="head-actions">
+          <button id="btn-rescan" class="btn btn-quiet" title="Rescan the inbox">Rescan</button>
+          <button id="btn-add-folder" class="btn btn-quiet">Add folder…</button>
+        </div>
+      </div>
+
+      <div id="inbox-error" class="notice notice-warn" hidden></div>
+
+      <div class="list-toolbar">
+        <label class="checkline">
+          <input type="checkbox" id="select-all" />
+          <span id="selection-summary">Nothing selected</span>
+        </label>
+        <div class="grow"></div>
+        <button id="btn-cancel" class="btn btn-danger" hidden>Stop</button>
+        <button id="btn-process" class="btn btn-primary" disabled>Process</button>
+      </div>
+
+      <ul id="settlement-list" class="settlements"></ul>
+      <p id="empty-state" class="empty" hidden>
+        No pending settlements.<br />
+        <span class="subtle">Drop a folder named <code>&lt;alias&gt;-&lt;name&gt;</code> into the inbox, or use “Add folder…”.</span>
+      </p>
+    </section>
+
+    <section class="panel panel-log">
+      <div class="panel-head">
+        <h2>Log</h2>
+        <div class="head-actions">
+          <span id="phase-label" class="subtle"></span>
+          <button id="btn-clear-log" class="btn btn-quiet">Clear</button>
+        </div>
+      </div>
+      <pre id="log" class="log" aria-live="polite"></pre>
+    </section>
+  </main>
+
+  <!-- ========================== SETTINGS VIEW ========================== -->
+  <main id="view-settings" class="view" hidden>
+    <div class="settings-scroll">
+      <section class="card">
+        <h2>Credentials</h2>
+        <p class="subtle">
+          Stored encrypted in your macOS Keychain via Electron <code>safeStorage</code>, and passed to the
+          automation only for the length of a run. Leave a field blank to keep the saved value.
+        </p>
+        <div id="creds-source" class="notice notice-info" hidden></div>
+
+        <div class="field">
+          <label for="c-user">indfak2 username</label>
+          <div class="field-row">
+            <input id="c-user" type="text" autocomplete="off" spellcheck="false" placeholder="name@sund.ku.dk" />
+            <span class="state" data-state-for="INDFAK_USERNAME"></span>
+          </div>
+        </div>
+        <div class="field">
+          <label for="c-pass">indfak2 password</label>
+          <div class="field-row">
+            <input id="c-pass" type="password" autocomplete="off" placeholder="••••••••" />
+            <span class="state" data-state-for="INDFAK_PASSWORD"></span>
+          </div>
+        </div>
+        <div class="field">
+          <label for="c-totp">TOTP secret (2FA)</label>
+          <div class="field-row">
+            <input id="c-totp" type="password" autocomplete="off" spellcheck="false" placeholder="Base32 secret" />
+            <span class="state" data-state-for="TOTP_SECRET"></span>
+          </div>
+          <p class="hint">
+            The Base32 secret from your indfak2 authenticator enrolment — the app generates 2FA codes itself.
+            Without it, each run stops and asks you for a code.
+            <button id="btn-totp-help" class="linkish" type="button">How do I get it?</button>
+          </p>
+        </div>
+        <div class="field">
+          <label for="c-key">Anthropic API key</label>
+          <div class="field-row">
+            <input id="c-key" type="password" autocomplete="off" spellcheck="false" placeholder="sk-ant-…" />
+            <span class="state" data-state-for="ANTHROPIC_API_KEY"></span>
+          </div>
+          <p class="hint">Used to read the invoices. It is the only external service the app talks to besides indfak2.dk.</p>
+        </div>
+        <div class="actions">
+          <button id="btn-save-creds" class="btn btn-primary">Save credentials</button>
+          <button id="btn-import-env" class="btn btn-quiet" hidden>Import from .env</button>
+          <span id="creds-msg" class="msg"></span>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Folders</h2>
+        <div class="field">
+          <label for="s-inbox">Receipts inbox</label>
+          <div class="field-row">
+            <input id="s-inbox" type="text" spellcheck="false" class="mono" />
+            <button class="btn btn-quiet" data-pick="s-inbox" data-pick-title="Choose the receipts inbox">Choose…</button>
+          </div>
+        </div>
+        <div class="field">
+          <label for="s-output">Claims output</label>
+          <div class="field-row">
+            <input id="s-output" type="text" spellcheck="false" class="mono" />
+            <button class="btn btn-quiet" data-pick="s-output" data-pick-title="Choose the claims output folder">Choose…</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Expense defaults</h2>
+        <p class="subtle">Used for settlements that are not detected as travel. Trips select the travel type and purpose automatically.</p>
+        <div class="field">
+          <label for="s-alias">Project alias</label>
+          <input id="s-alias" type="text" spellcheck="false" />
+        </div>
+        <div class="field">
+          <label for="s-alias-option">Alias option (full label)</label>
+          <input id="s-alias-option" type="text" spellcheck="false" />
+        </div>
+        <div class="field">
+          <label for="s-type">Type</label>
+          <input id="s-type" type="text" spellcheck="false" />
+        </div>
+        <div class="field">
+          <label for="s-purpose">Purpose</label>
+          <input id="s-purpose" type="text" spellcheck="false" />
+        </div>
+        <div class="field">
+          <label for="s-card">Corporate card description</label>
+          <textarea id="s-card" rows="3" spellcheck="false"></textarea>
+          <p class="hint">Describes your corporate card so card-paid receipts can be told apart from out-of-pocket ones.</p>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Browser</h2>
+        <label class="checkline">
+          <input type="checkbox" id="s-headless" />
+          <span>Run Chromium hidden (headless)</span>
+        </label>
+        <p class="hint">Off by default so you can watch the automation and step in if indfak2 asks something unexpected.</p>
+        <div id="browser-status" class="notice notice-info"></div>
+        <div class="actions">
+          <button id="btn-install-browser" class="btn btn-quiet">Download Chromium…</button>
+          <span id="browser-msg" class="msg"></span>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Delete a draft</h2>
+        <p class="subtle">Deletes every indfak2 draft whose name contains this text. Useful after a crashed run left a half-filled draft behind.</p>
+        <div class="field-row">
+          <input id="d-name" type="text" spellcheck="false" placeholder="part of the draft name" />
+          <button id="btn-delete-draft" class="btn btn-danger">Delete drafts…</button>
+        </div>
+        <p id="draft-msg" class="msg"></p>
+      </section>
+
+      <section class="card">
+        <div class="actions actions-sticky">
+          <button id="btn-save-settings" class="btn btn-primary">Save settings</button>
+          <span id="settings-msg" class="msg"></span>
+        </div>
+        <p id="app-info" class="subtle mono"></p>
+      </section>
+    </div>
+  </main>
+
+  <!-- ============================= DIALOGS ============================= -->
+  <div id="totp-modal" class="modal" hidden>
+    <div class="modal-box">
+      <h3>Two-factor code needed</h3>
+      <p class="subtle">No TOTP secret is configured, so the automation is waiting for a code from your authenticator app.</p>
+      <input id="totp-input" type="text" inputmode="numeric" maxlength="8" placeholder="123456" autocomplete="off" />
+      <div class="modal-actions">
+        <button id="totp-cancel" class="btn btn-quiet">Cancel run</button>
+        <button id="totp-ok" class="btn btn-primary">Submit</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="result-modal" class="modal" hidden>
+    <div class="modal-box modal-wide">
+      <h3 id="result-title">Result</h3>
+      <div id="result-body" class="result-body"></div>
+      <div class="modal-actions">
+        <button id="result-open-folder" class="btn btn-quiet">Open output folder</button>
+        <button id="result-open-manifest" class="btn btn-quiet">Open manifest.json</button>
+        <button id="result-close" class="btn btn-primary">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="totp-help-modal" class="modal" hidden>
+    <div class="modal-box modal-wide">
+      <h3>Getting your TOTP secret</h3>
+      <ol class="steps">
+        <li>Log in to <span class="mono">indfak2.dk</span> in your browser and open your account security settings.</li>
+        <li>Start re-enrolling two-factor authentication. When the QR code appears, look for the
+            “can’t scan / enter manually” link — that shows the Base32 secret.</li>
+        <li>Paste that secret here and finish the enrolment in your authenticator app as usual.</li>
+      </ol>
+      <p class="subtle">
+        The repository also ships <span class="mono">setup-totp.js</span>, which drives the same flow in a
+        scripted browser and reads the secret out of the QR code for you.
+      </p>
+      <div class="modal-actions"><button id="totp-help-close" class="btn btn-primary">Got it</button></div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
