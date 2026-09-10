@@ -8,7 +8,7 @@
   "private": true,
   "scripts": {
     "dev": "unset ELECTRON_RUN_AS_NODE; electron .",
-    "dist": "electron-builder --mac",
+    "dist": "electron-builder --mac --publish never",
     "bot": "node bot.js",
     "playwright:install": "playwright install chromium"
   },

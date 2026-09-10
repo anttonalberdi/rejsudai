@@ -43,6 +43,9 @@ jobs:
           echo "TAG=$TAG" >> "$GITHUB_ENV"
           npm version --no-git-tag-version --allow-same-version "${TAG#v}"
 
+      # `npm run dist` carries --publish never: electron-builder sees the release
+      # tag on the checkout and would otherwise try to publish the artifacts
+      # itself, which needs a token. Uploading is the next step's job.
       - name: Build
         run: npm run dist
         env:

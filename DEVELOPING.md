@@ -36,6 +36,12 @@ first run — so the build needs no Playwright browsers.
 whenever one is **published**. It needs no secrets: there is nothing to compile
 natively, no Chromium to fetch, and the build is unsigned.
 
+`npm run dist` passes `--publish never`, and has to. On a checkout that has the
+release tag on it, electron-builder otherwise decides to publish the artifacts
+itself and dies with *GitHub Personal Access Token is not set* — after building
+a perfectly good `.dmg`. Uploading is the workflow's last step
+(`gh release upload`), not electron-builder's job.
+
 The workflow rewrites `package.json`'s version from the tag name before building
 (not committed back), so tagging `v1.0.1` produces `Rejsud-1.0.1-arm64.dmg`.
 `workflow_dispatch` rebuilds an existing release by hand.
