@@ -19,11 +19,7 @@ file.
 
 ## [Unreleased]
 
-### Changed
-
-- Removed the developer-specific project alias from application defaults,
-  documentation, and recorded browser selectors. New installs start with an
-  empty alias library.
+_Nothing yet._
 
 ---
 
@@ -76,7 +72,9 @@ _The first release: the indfak2 automation as a macOS app._
 - A dev `.env` is read as a read-only fallback, with a one-click **Import from
   .env**.
 - **Aliases** tab: the project library (`short name` + indfak2 code), saved
-  separately from settings so the two pages cannot overwrite each other.
+  separately from settings so the two pages cannot overwrite each other. New
+  installs start with an empty library: no project alias ships as a default, in
+  the documentation, or in the recorded browser selectors.
 - Settings for the claims-output folder, expense defaults (alias option, type,
   purpose, corporate-card description), and a headless toggle.
 - Chromium is resolved from the app's own copy, then Playwright's shared cache,
