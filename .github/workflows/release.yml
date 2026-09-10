@@ -1,0 +1,56 @@
+name: Build macOS app
+
+# Fires when a GitHub release is published (including one created from a tag
+# in the UI). workflow_dispatch is there to rebuild a release by hand.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to build and upload to (e.g. v1.0.1)
+        required: true
+
+permissions:
+  contents: write        # needed to upload the .dmg onto the release
+
+jobs:
+  dmg:
+    # macos-latest is Apple silicon — the .dmg is arm64 either way (the target
+    # is pinned in package.json), but building on arm64 keeps it honest.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # Full install: electron-builder itself is a devDependency, and `files`
+      # bundles node_modules wholesale. Chromium is fetched by the app at first
+      # run, never bundled, so playwright's postinstall download is dead weight.
+      - name: Install dependencies
+        run: npm ci
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
+
+      # electron-builder names the .dmg after package.json's version; take it
+      # from the tag so the asset matches the release.
+      - name: Sync version to the release tag
+        run: |
+          TAG="${{ github.event.release.tag_name || inputs.tag }}"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          npm version --no-git-tag-version --allow-same-version "${TAG#v}"
+
+      - name: Build
+        run: npm run dist
+        env:
+          # The build is deliberately unsigned (mac.identity is null); stop
+          # electron-builder from hunting for a keychain identity in CI.
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      - name: Upload the .dmg to the release
+        run: gh release upload "$TAG" dist/*.dmg --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}

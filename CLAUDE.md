@@ -1,7 +1,8 @@
 # rejsud-bot
 
-> **This automation is now wrapped in a macOS desktop app.** See `README.md` for
-> the app, its Keychain-backed credential storage, and how it spawns `bot.js`.
+> **This automation is now wrapped in a macOS desktop app.** `README.md` is the
+> user's guide to that app; `DEVELOPING.md` covers building it, its
+> Keychain-backed credential storage, and how it spawns `bot.js`.
 > Everything below still describes `bot.js` itself, which is unchanged as an
 > automation and still runs standalone as `node bot.js <folder>`. The only edits
 > made for the app — a `@@REJSUD` progress emitter, a GUI 2FA prompt replacing
