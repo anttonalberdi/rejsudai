@@ -1,7 +1,7 @@
-# Developing Rejsud
+# Developing Rejsudai
 
 Everything in this file is for working on the app or building it yourself. If
-you just want to *use* Rejsud, [`README.md`](README.md) is the whole story.
+you just want to *use* Rejsudai, [`README.md`](README.md) is the whole story.
 
 ## Running from source
 
@@ -25,8 +25,8 @@ values into the Keychain. `.env` is gitignored.
 npm run dist
 ```
 
-Produces `dist/Rejsud-<version>-arm64.dmg` (~135 MB) and
-`dist/mac-arm64/Rejsud.app`. Chromium is *not* in there — the app downloads it on
+Produces `dist/Rejsudai-<version>-arm64.dmg` (~135 MB) and
+`dist/mac-arm64/Rejsudai.app`. Chromium is *not* in there — the app downloads it on
 first run — so the build needs no Playwright browsers.
 
 ### Releasing through GitHub Actions
@@ -43,7 +43,7 @@ a perfectly good `.dmg`. Uploading is the workflow's last step
 (`gh release upload`), not electron-builder's job.
 
 The workflow rewrites `package.json`'s version from the tag name before building
-(not committed back), so tagging `v1.0.1` produces `Rejsud-1.0.1-arm64.dmg`.
+(not committed back), so tagging `v1.0.1` produces `Rejsudai-1.0.1-arm64.dmg`.
 `workflow_dispatch` rebuilds an existing release by hand.
 
 The README does not name a version or a filename anywhere — it links to
@@ -72,7 +72,7 @@ icon-grid padding, shown next to the wordmark in the window's top bar.
 ships is the stock Electron binary's ad-hoc linker signature (`Signature=adhoc`,
 `Sealed Resources=none`). That is fine for a locally built app, which carries no
 quarantine flag. A `.dmg` **downloaded from a release** is quarantined, and
-against an unsealed ad-hoc bundle macOS usually refuses with *"Rejsud is damaged
+against an unsealed ad-hoc bundle macOS usually refuses with *"Rejsudai is damaged
 and can't be opened"* rather than offering the right-click → Open escape hatch —
 which is why the README tells users to run `xattr -dr com.apple.quarantine`.
 
@@ -124,17 +124,17 @@ hard-won, and treated as a black box.
 
 ### The changes made to `bot.js`
 
-All of them are inert unless `REJSUD_GUI=1` is set, which only the app does, so
+All of them are inert unless `REJSUDAI_GUI=1` is set, which only the app does, so
 CLI behaviour is unchanged. They are marked with comments in the source:
 
 | Change | Why |
 |---|---|
-| `rejsudEmit()` helper | Writes one-line `@@REJSUD {json}` progress events to stdout so the app can show progress and locate the manifest without screen-scraping prose. Emits nothing when `REJSUD_GUI` is unset. |
-| `rejsudAskGuiForOTP()` in `getOTP()` | The old `readline` fallback prompted on a terminal that a windowed app does not have, and would hang forever. Under the GUI it asks the app for a code and reads it from stdin instead. The terminal prompt is kept for CLI runs. |
-| `headless: process.env.REJSUD_HEADLESS === '1'` | Backs the Settings toggle. With the variable unset this is `false` — identical to the original hardcoded value. |
-| `SUBMIT_SETTLEMENT` + `submitSettlement()` | Backs the *Submit for approval* toggle (`REJSUD_SUBMIT=1`), and `--submit` on the CLI. Unset, the run ends on a draft exactly as before. |
-| `setStep()` / `describeFailure()` / `reportFailure()` | A Playwright abort reads `locator.waitFor: Timeout 10000ms exceeded` and names only a selector, which tells the user nothing. Each stage of the run now declares what it is doing, and a failure is reported as cause + step + evidence + fix — as a `@@REJSUD error` event for the app, and as a printed block on the CLI. |
-| `rejsudStartScreencast()` after `browser.newPage()` | Feeds the Browser pane. Requires `app/lib/screencast.js` lazily and only when the app spawned the process (`process.send` exists), so a CLI run neither loads it nor pays for it. Failures are logged and ignored — a dead preview must not fail a settlement. |
+| `rejsudaiEmit()` helper | Writes one-line `@@REJSUDAI {json}` progress events to stdout so the app can show progress and locate the manifest without screen-scraping prose. Emits nothing when `REJSUDAI_GUI` is unset. |
+| `rejsudaiAskGuiForOTP()` in `getOTP()` | The old `readline` fallback prompted on a terminal that a windowed app does not have, and would hang forever. Under the GUI it asks the app for a code and reads it from stdin instead. The terminal prompt is kept for CLI runs. |
+| `headless: process.env.REJSUDAI_HEADLESS === '1'` | Backs the Settings toggle. With the variable unset this is `false` — identical to the original hardcoded value. |
+| `SUBMIT_SETTLEMENT` + `submitSettlement()` | Backs the *Submit for approval* toggle (`REJSUDAI_SUBMIT=1`), and `--submit` on the CLI. Unset, the run ends on a draft exactly as before. |
+| `setStep()` / `describeFailure()` / `reportFailure()` | A Playwright abort reads `locator.waitFor: Timeout 10000ms exceeded` and names only a selector, which tells the user nothing. Each stage of the run now declares what it is doing, and a failure is reported as cause + step + evidence + fix — as a `@@REJSUDAI error` event for the app, and as a printed block on the CLI. |
+| `rejsudaiStartScreencast()` after `browser.newPage()` | Feeds the Browser pane. Requires `app/lib/screencast.js` lazily and only when the app spawned the process (`process.send` exists), so a CLI run neither loads it nor pays for it. Failures are logged and ignored — a dead preview must not fail a settlement. |
 
 Beyond the optional submit step at the very end of a run, no control flow in the
 indfak2 or Playwright logic was changed.

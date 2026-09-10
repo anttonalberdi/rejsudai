@@ -1,6 +1,6 @@
 # Changelog
 
-Notable changes to Rejsud, newest first. The format follows
+Notable changes to Rejsudai, newest first. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
@@ -10,7 +10,7 @@ it.
 
 **Cutting a release.** Don't edit `package.json` — publish a GitHub release on a
 `vX.Y.Z` tag and [`.github/workflows/release.yml`](.github/workflows/release.yml)
-takes the version from the tag, builds `Rejsud-X.Y.Z-arm64.dmg` and uploads it.
+takes the version from the tag, builds `Rejsudai-X.Y.Z-arm64.dmg` and uploads it.
 Before tagging, close off the section below by giving it the release date, add a
 fresh `## [Unreleased]` above it, and add the tag's link at the foot of this
 file.
@@ -35,7 +35,7 @@ _The first release: the indfak2 automation as a macOS app._
   **Aliases**, **Settings**. No terminal, no Claude Code, no agent permissions.
 - **New settlement**: name it, pick its project alias from your library or add
   one inline, and drop receipts in — or point at a folder and use everything
-  inside. Creating it writes the inbox folder plus a `.rejsud.json` carrying the
+  inside. Creating it writes the inbox folder plus a `.rejsudai.json` carrying the
   alias and the name exactly as typed, then files it immediately. **Save
   settlement** keeps it for later instead.
 - Any folder of receipts already sitting in the inbox is listed as a pending
@@ -66,7 +66,7 @@ _The first release: the indfak2 automation as a macOS app._
 
 - indfak2 username, password, TOTP secret and Anthropic API key encrypted with
   Electron `safeStorage` (macOS login Keychain) at
-  `~/Library/Application Support/Rejsud/credentials.enc`, mode `0600`. They are
+  `~/Library/Application Support/Rejsudai/credentials.enc`, mode `0600`. They are
   never written to a `.env`, never bundled, and reach the automation only as
   environment variables for the length of a run.
 - A dev `.env` is read as a read-only fallback, with a one-click **Import from
@@ -103,7 +103,7 @@ _The first release: the indfak2 automation as a macOS app._
   departure and destination, which is what keeps cost-line dates valid.
 - Every line save is verified — the form must actually close — and the
   "Errors count: N" banner is read back rather than assumed away.
-- Optional **submit**: `--submit` or `REJSUD_SUBMIT=1` walks the multi-step send
+- Optional **submit**: `--submit` or `REJSUDAI_SUBMIT=1` walks the multi-step send
   wizard, but only for a settlement with nothing left unfiled, and confirms the
   draft has left the list before calling it sent.
 - One failing document no longer aborts a run: the error, a hint and a
@@ -118,13 +118,13 @@ _The first release: the indfak2 automation as a macOS app._
   wrong password, rejected 2FA, missing alias, rate-limited or unpaid Anthropic
   key, missing Chromium, full disk) and as a step-aware sentence otherwise.
 - The CLI is unchanged and still works standalone: the app's additions to
-  `bot.js` (`@@REJSUD` events, the GUI 2FA prompt, `REJSUD_HEADLESS`, the
-  screencast) are inert unless `REJSUD_GUI=1`.
+  `bot.js` (`@@REJSUDAI` events, the GUI 2FA prompt, `REJSUDAI_HEADLESS`, the
+  screencast) are inert unless `REJSUDAI_GUI=1`.
 
 **Build and distribution**
 
-- `npm run dist` produces an unsigned `Rejsud-<version>-arm64.dmg` and
-  `Rejsud.app`; Chromium is deliberately not bundled.
+- `npm run dist` produces an unsigned `Rejsudai-<version>-arm64.dmg` and
+  `Rejsudai.app`; Chromium is deliberately not bundled.
 - `asar` is disabled — the automation runs as a plain-Node child process, which
   cannot read files inside an asar archive.
 - Hardened-runtime entitlements in `build/entitlements.mac.plist`, ready for a
@@ -148,7 +148,7 @@ _The first release: the indfak2 automation as a macOS app._
 
 - macOS on Apple silicon only.
 - The build is unsigned, so a fresh install needs
-  `xattr -dr com.apple.quarantine /Applications/Rejsud.app` once — including
+  `xattr -dr com.apple.quarantine /Applications/Rejsudai.app` once — including
   after each update.
 - Chromium is a ~150 MB one-time download on first run.
 - One run at a time: indfak2 is a single interactive session.
@@ -157,7 +157,7 @@ _The first release: the indfak2 automation as a macOS app._
 
 ## Before 1.0.0
 
-Rejsud started as `bot.js`, a Playwright + Claude script driven from a terminal
+Rejsudai started as `bot.js`, a Playwright + Claude script driven from a terminal
 (`node bot.js <folder>`). Nothing before 1.0.0 was tagged or released; the
 history is in the git log, from the initial commit through
 `Wrap the indfak2 automation in a macOS desktop app` and

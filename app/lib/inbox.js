@@ -11,7 +11,7 @@ const DOC_RE = /\.(pdf|png|jpe?g|heic)$/i;
 
 // Mirrors SETTLEMENT_META / readSettlementMeta() in bot.js, so the list shows
 // the name and alias the draft will actually get.
-const META_FILE = '.rejsud.json';
+const META_FILE = '.rejsudai.json';
 
 function nameFromFolder(folderName) {
   return folderName

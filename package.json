@@ -1,6 +1,6 @@
 {
-  "name": "rejsud",
-  "productName": "Rejsud",
+  "name": "rejsudai",
+  "productName": "Rejsudai",
   "version": "1.0.0",
   "description": "Desktop app for filing travel/expense settlements into indfak2.dk",
   "main": "app/main.js",
@@ -24,8 +24,8 @@
     "electron-builder": "^26.15.3"
   },
   "build": {
-    "appId": "dk.ku.rejsud",
-    "productName": "Rejsud",
+    "appId": "dk.ku.rejsudai",
+    "productName": "Rejsudai",
     "copyright": "Copyright \u00a9 2026",
     "directories": {
       "output": "dist",
@@ -67,7 +67,7 @@
       "identity": null
     },
     "dmg": {
-      "title": "Rejsud ${version}"
+      "title": "Rejsudai ${version}"
     }
   }
 }

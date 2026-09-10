@@ -1,10 +1,10 @@
 <img src="build/icon.png" alt="" width="120" align="right">
 
-# Rejsud
+# Rejsudai
 
 **Files your travel and expense settlements into indfak2.dk for you.**
 
-Drop the receipts in, name the settlement, press go. Rejsud reads every receipt,
+Drop the receipts in, name the settlement, press go. Rejsudai reads every receipt,
 logs into indfak2 with your 2FA, creates the draft, matches each cost to the
 right card transaction, fills in the line items and uploads the documents — while
 you watch it happen in the window.
@@ -17,18 +17,18 @@ No terminal. No setup beyond filling in your credentials once.
 
 ## Installing
 
-1. Download `Rejsud-<version>-arm64.dmg` from the
+1. Download `Rejsudai-<version>-arm64.dmg` from the
    [latest release](https://github.com/anttonalberdi/rejsudai/releases/latest).
-2. Open it and drag **Rejsud** into your Applications folder.
+2. Open it and drag **Rejsudai** into your Applications folder.
 3. The app is not signed with an Apple developer certificate, so macOS will
    refuse to open it the first time — possibly saying it is *damaged*. It isn't.
    Open Terminal, paste this line and press return:
 
    ```bash
-   xattr -dr com.apple.quarantine /Applications/Rejsud.app
+   xattr -dr com.apple.quarantine /Applications/Rejsudai.app
    ```
 
-   That is a one-off. Rejsud opens normally from then on, and updates you install
+   That is a one-off. Rejsudai opens normally from then on, and updates you install
    later need the same line again.
 
 ## Before you start
@@ -41,12 +41,12 @@ You need two things:
   Settings → API keys → **Create key**, on an account with billing set up. This
   is the developer console and is billed per use — it is separate from a
   Claude.ai subscription. The key starts with `sk-ant-` and is shown only once,
-  so copy it straight into Rejsud. If you lose it, revoke it there and make a new
+  so copy it straight into Rejsudai. If you lose it, revoke it there and make a new
   one.
 
 ## First run
 
-Until your credentials are stored, Rejsud opens on **Settings** every time and
+Until your credentials are stored, Rejsudai opens on **Settings** every time and
 says so at the top. Fill in:
 
 ### 1. Credentials
@@ -54,7 +54,7 @@ says so at the top. Fill in:
 Your indfak2 username and password, your TOTP secret, and your Anthropic API
 key.
 
-**The TOTP secret** is what lets Rejsud generate your 2FA codes and run
+**The TOTP secret** is what lets Rejsudai generate your 2FA codes and run
 unattended. When you enrol two-factor authentication on indfak2, the QR code has
 a **16-character code printed directly below it** — the one offered for typing
 into an authenticator app by hand. *That* is the secret. Copy it into the field
@@ -63,15 +63,15 @@ exactly as displayed, and if indfak2 prints it in spaced groups
 only — a `0`, `1`, `8` or `9` means you have copied the wrong string. It is
 **not** the 6-digit number your authenticator shows, which changes every 30
 seconds; this is the fixed seed behind it, and you enter it once. Finish
-enrolment normally by scanning the same QR code with your phone — Rejsud and your
+enrolment normally by scanning the same QR code with your phone — Rejsudai and your
 phone then produce identical codes.
 
-Without the secret, Rejsud still works: each run pauses and asks you for a code
+Without the secret, Rejsudai still works: each run pauses and asks you for a code
 in a dialog.
 
 > **Where your credentials live.** They are encrypted with your macOS login
 > Keychain and written to
-> `~/Library/Application Support/Rejsud/credentials.enc`, readable only by you.
+> `~/Library/Application Support/Rejsudai/credentials.enc`, readable only by you.
 > They are never bundled into the app, and they reach the automation only as
 > environment variables for the length of a run. If a credential somehow appears
 > in a run's output, it is replaced with `«redacted»` before the log shows it.
@@ -89,7 +89,7 @@ the travel type and purpose themselves.
 
 ### 4. Chromium (one-time, ~150 MB)
 
-Rejsud drives a real browser, which is too big to ship inside the app. Settings →
+Rejsudai drives a real browser, which is too big to ship inside the app. Settings →
 Browser shows which one it is using; if there isn't one, press **Download
 Chromium…** and it fetches its own copy. If you have ever used Playwright on this
 Mac, the browser already in its cache is reused and nothing is downloaded.
@@ -125,7 +125,7 @@ the list then shows it as **Running**.
   indfak2 — the short name is there so the list reads as project names rather
   than digits.
 
-Rejsud also lists any folder of receipts it finds sitting in your inbox as a
+Rejsudai also lists any folder of receipts it finds sitting in your inbox as a
 pending settlement. Select some and press **Process** to file them in one batch.
 
 ### Watching a run
@@ -212,11 +212,11 @@ window turns, the Browser pane and the log included.
 
 ## Privacy
 
-Rejsud makes no network calls of its own: no telemetry, no analytics, no crash
+Rejsudai makes no network calls of its own: no telemetry, no analytics, no crash
 reporting. The only outbound traffic is the work itself — the Anthropic API to
 read your receipts, and indfak2.dk — plus the one-time Chromium download.
 
 ---
 
-Building Rejsud, running it from source, or working on the automation:
+Building Rejsudai, running it from source, or working on the automation:
 [`DEVELOPING.md`](DEVELOPING.md).

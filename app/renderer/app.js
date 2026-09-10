@@ -1,5 +1,5 @@
 'use strict';
-/* Renderer. No Node access — everything goes through window.rejsud (preload). */
+/* Renderer. No Node access — everything goes through window.rejsudai (preload). */
 
 const $ = sel => document.querySelector(sel);
 // Electron wraps rejected IPC handlers as "Error invoking remote method 'x': Error: real message".
@@ -49,14 +49,14 @@ $('#btn-clear-log').addEventListener('click', () => (logEl.textContent = ''));
 const frameEl = $('#browser-frame');
 const liveBadge = $('#browser-live');
 
-window.rejsud.onFrame(({ data }) => {
+window.rejsudai.onFrame(({ data }) => {
   if (!data) return;
   frameEl.src = `data:image/jpeg;base64,${data}`;
   frameEl.hidden = false;
   $('#browser-idle').hidden = true;
   liveBadge.hidden = false;
 });
-window.rejsud.onFrameEnd(() => (liveBadge.hidden = true));
+window.rejsudai.onFrameEnd(() => (liveBadge.hidden = true));
 
 /* ------------------------------------------------------------- appearance -- */
 // "auto" leaves the CSS pairs on `color-scheme: light dark` and lets macOS
@@ -81,7 +81,7 @@ document.querySelectorAll('input[name="theme"]').forEach(radio => {
   radio.addEventListener('change', () => {
     if (!radio.checked) return;
     const chosen = applyTheme(radio.value);
-    window.rejsud.settings.save({ theme: chosen }).catch(err => flash('#settings-msg', clean(err), 'err'));
+    window.rejsudai.settings.save({ theme: chosen }).catch(err => flash('#settings-msg', clean(err), 'err'));
   });
 });
 
@@ -115,7 +115,7 @@ function setLayout(key, pct) {
   layout[key] = next;
   applyLayout();
   clearTimeout(layoutSaveTimer);
-  layoutSaveTimer = setTimeout(() => window.rejsud.settings.save({ layout: { ...layout } }).catch(() => {}), 400);
+  layoutSaveTimer = setTimeout(() => window.rejsudai.settings.save({ layout: { ...layout } }).catch(() => {}), 400);
 }
 
 // Drag it, arrow-key it, or double-click to put it back where it started.
@@ -217,7 +217,7 @@ function failureBlock(item) {
   if (f.screenshot) {
     const b = el('button', 'btn btn-quiet', 'Screenshot');
     b.title = 'The page as it looked when the run stopped';
-    b.addEventListener('click', () => window.rejsud.shell.openPath(f.screenshot));
+    b.addEventListener('click', () => window.rejsudai.shell.openPath(f.screenshot));
     acts.appendChild(b);
   }
   if (f.raw && f.raw !== f.title) {
@@ -272,12 +272,12 @@ function render() {
     }
     if (item.outputFolder) {
       const b = el('button', 'btn btn-quiet', 'Open output folder');
-      b.addEventListener('click', () => window.rejsud.shell.openPath(item.outputFolder));
+      b.addEventListener('click', () => window.rejsudai.shell.openPath(item.outputFolder));
       actions.appendChild(b);
     }
     if (item.manifestPath) {
       const b = el('button', 'btn btn-quiet', 'manifest.json');
-      b.addEventListener('click', () => window.rejsud.shell.openPath(item.manifestPath));
+      b.addEventListener('click', () => window.rejsudai.shell.openPath(item.manifestPath));
       actions.appendChild(b);
     }
     // A settlement saved but not yet filed is only its inbox folder, so removing
@@ -329,7 +329,7 @@ $('#select-all').addEventListener('change', e => {
 });
 
 async function scanInbox() {
-  const res = await window.rejsud.inbox.scan();
+  const res = await window.rejsudai.inbox.scan();
   $('#inbox-error').hidden = res.exists;
   if (!res.exists) {
     $('#inbox-error').textContent = `Inbox folder not found: ${res.inbox} — set it in Settings.`;
@@ -368,7 +368,7 @@ async function removeSettlement(item) {
   item.removing = true;
   render();
   try {
-    const res = await window.rejsud.inbox.remove(item.path);
+    const res = await window.rejsudai.inbox.remove(item.path);
     if (res && res.cancelled) return;
     items.delete(item.id);
     appendLog(
@@ -394,7 +394,7 @@ function setSubmitOption(value, { persist = true } = {}) {
   submitAfterFiling = !!value;
   $('#opt-submit').checked = submitAfterFiling;
   $('#opt-submit-new').checked = submitAfterFiling;
-  if (persist) window.rejsud.settings.save({ submitAfterFiling }).catch(() => {});
+  if (persist) window.rejsudai.settings.save({ submitAfterFiling }).catch(() => {});
 }
 
 for (const id of ['#opt-submit', '#opt-submit-new']) {
@@ -414,7 +414,7 @@ $('#btn-process').addEventListener('click', async () => {
   }
   render();
   try {
-    const state = await window.rejsud.run.start(
+    const state = await window.rejsudai.run.start(
       targets.map(t => ({ id: t.id, path: t.path, folder: t.folder })),
       { submit: submitAfterFiling }
     );
@@ -430,7 +430,7 @@ $('#btn-process').addEventListener('click', async () => {
 });
 
 $('#btn-cancel').addEventListener('click', () => {
-  window.rejsud.run.cancel();
+  window.rejsudai.run.cancel();
   appendLog('\nStopping. The current settlement is being cut short — its indfak2 draft may be left half-filled; review it in indfak2 and delete it there if needed.\n', 'app');
 });
 
@@ -448,8 +448,8 @@ function setRunning(state) {
   render();
 }
 
-window.rejsud.onLog(({ text, stream }) => appendLog(text, stream));
-window.rejsud.onRunState(setRunning);
+window.rejsudai.onLog(({ text, stream }) => appendLog(text, stream));
+window.rejsudai.onRunState(setRunning);
 
 // The status line pairs where the run is in the batch ("Filing 2/3 · x.pdf")
 // with what it is doing right now ("searching the card transactions"), so a
@@ -459,7 +459,7 @@ function showStatus() {
   const step = statusLine.step ? statusLine.step[0].toUpperCase() + statusLine.step.slice(1) : '';
   $('#phase-label').textContent = [statusLine.count, step].filter(Boolean).join(' — ');
 }
-window.rejsud.onProgress(p => {
+window.rejsudai.onProgress(p => {
   if (p.event === 'phase') {
     statusLine.count = { parsing: 'Reading documents', planning: 'Planning settlement',
                          filing: 'Filing into indfak2', submitting: 'Submitting for approval' }[p.phase] || '';
@@ -476,7 +476,7 @@ window.rejsud.onProgress(p => {
   if (p.event === 'phase' || p.event === 'progress' || p.event === 'step' || p.event === 'error') showStatus();
 });
 
-window.rejsud.onSettlement(async p => {
+window.rejsudai.onSettlement(async p => {
   const item = items.get(p.id);
   if (!item) return;
   // A settlement that actually left for approval says so, rather than reading
@@ -512,7 +512,7 @@ function openNewPage() {
   $('#n-alias-code').value = '';
   // Re-read rather than trust the mirror: the library may have been edited in
   // Settings since the page was last open.
-  window.rejsud.settings.get().then(s => {
+  window.rejsudai.settings.get().then(s => {
     adoptAliases(s);
     fillAliasSelect(aliasLib.defaultCode);
     refreshCompose();
@@ -559,7 +559,7 @@ $('#n-alias').addEventListener('change', () => {
 // Puts the typed alias in the library and selects it. The run does this too, so
 // this is only for saving one without filing a settlement behind it.
 async function saveTypedAlias() {
-  const { settings, alias, added } = await window.rejsud.settings.addAlias({
+  const { settings, alias, added } = await window.rejsudai.settings.addAlias({
     name: $('#n-alias-name').value,
     code: $('#n-alias-code').value,
   });
@@ -586,7 +586,7 @@ $('#btn-new-cancel').addEventListener('click', () => showView('run'));
 // --- receipts ---------------------------------------------------------------
 async function addPaths(paths) {
   if (!paths.length) return;
-  const { files, skipped } = await window.rejsud.inbox.expand(paths);
+  const { files, skipped } = await window.rejsudai.inbox.expand(paths);
   // A drop replaces a declared folder: the two sources are alternatives.
   if (compose.sourceFolder) {
     compose.sourceFolder = null;
@@ -614,7 +614,7 @@ dropzone.addEventListener('drop', async e => {
   e.preventDefault();
   e.stopPropagation();
   dropzone.classList.remove('is-over');
-  const paths = [...e.dataTransfer.files].map(f => window.rejsud.pathForFile(f)).filter(Boolean);
+  const paths = [...e.dataTransfer.files].map(f => window.rejsudai.pathForFile(f)).filter(Boolean);
   await addPaths(paths);
 });
 dropzone.addEventListener('click', e => {
@@ -622,14 +622,14 @@ dropzone.addEventListener('click', e => {
 });
 
 $('#btn-choose-files').addEventListener('click', async () => {
-  const paths = await window.rejsud.dialog.pickFiles({ title: 'Choose receipts' });
+  const paths = await window.rejsudai.dialog.pickFiles({ title: 'Choose receipts' });
   await addPaths(paths || []);
 });
 
 $('#btn-pick-source').addEventListener('click', async () => {
-  const dir = await window.rejsud.dialog.pickDirectory({ title: 'Choose a folder of receipts' });
+  const dir = await window.rejsudai.dialog.pickDirectory({ title: 'Choose a folder of receipts' });
   if (!dir) return;
-  const { files, skipped } = await window.rejsud.inbox.expand([dir]);
+  const { files, skipped } = await window.rejsudai.inbox.expand([dir]);
   compose.sourceFolder = dir;
   compose.files = files;
   compose.skipped = skipped;
@@ -695,7 +695,7 @@ async function refreshCompose() {
   const alias = currentAliasCode();
   // The alias now always has a value, so an untouched page would otherwise open
   // on "Give the settlement a name." — wait for step 1 before previewing.
-  const answer = name.trim() ? await window.rejsud.inbox.propose({ name, alias }) : null;
+  const answer = name.trim() ? await window.rejsudai.inbox.propose({ name, alias }) : null;
   if (seq !== composeSeq) return;
 
   proposal = answer;
@@ -742,7 +742,7 @@ async function createFromCompose(btn) {
   // it from the dropdown. A code that is already in there just gets selected.
   try {
     if ($('#n-alias').value === NEW_ALIAS) await saveTypedAlias();
-    return await window.rejsud.inbox.create({
+    return await window.rejsudai.inbox.create({
       name: $('#n-name').value,
       alias: currentAliasCode(),
       files: compose.files.map(f => f.path),
@@ -787,7 +787,7 @@ $('#btn-run-new').addEventListener('click', async () => {
   render();
 
   try {
-    const state = await window.rejsud.run.start(
+    const state = await window.rejsudai.run.start(
       [{ id: created.id, path: created.path, folder: created.folder }],
       { submit: submitAfterFiling }
     );
@@ -807,7 +807,7 @@ $('#btn-run-new').addEventListener('click', async () => {
 });
 
 /* ------------------------------------------------------------ TOTP modal -- */
-window.rejsud.onTotpRequest(() => {
+window.rejsudai.onTotpRequest(() => {
   $('#totp-modal').hidden = false;
   $('#totp-input').value = '';
   $('#totp-input').focus();
@@ -815,11 +815,11 @@ window.rejsud.onTotpRequest(() => {
 $('#totp-ok').addEventListener('click', () => {
   const code = $('#totp-input').value.trim();
   if (!code) return;
-  window.rejsud.run.submitTotp(code);
+  window.rejsudai.run.submitTotp(code);
   $('#totp-modal').hidden = true;
 });
 $('#totp-cancel').addEventListener('click', () => {
-  window.rejsud.run.submitTotp('');
+  window.rejsudai.run.submitTotp('');
   $('#totp-modal').hidden = true;
 });
 $('#totp-input').addEventListener('keydown', e => {
@@ -880,7 +880,7 @@ function showResult(item) {
         if (d.hint) note.appendChild(el('div', 'failure-hint', d.hint));
         if (d.screenshot) {
           const b = el('button', 'btn btn-quiet', 'Screenshot');
-          b.addEventListener('click', () => window.rejsud.shell.openPath(d.screenshot));
+          b.addEventListener('click', () => window.rejsudai.shell.openPath(d.screenshot));
           note.appendChild(b);
         }
       }
@@ -898,9 +898,9 @@ function showResult(item) {
     body.appendChild(table);
   }
 
-  $('#result-open-folder').onclick = () => window.rejsud.shell.openPath(item.outputFolder);
+  $('#result-open-folder').onclick = () => window.rejsudai.shell.openPath(item.outputFolder);
   $('#result-open-folder').disabled = !item.outputFolder;
-  $('#result-open-manifest').onclick = () => window.rejsud.shell.openPath(item.manifestPath);
+  $('#result-open-manifest').onclick = () => window.rejsudai.shell.openPath(item.manifestPath);
   $('#result-open-manifest').disabled = !item.manifestPath;
   $('#result-modal').hidden = false;
 }
@@ -924,7 +924,7 @@ const SETTING_FIELDS = {
 };
 
 async function loadSettings() {
-  const s = await window.rejsud.settings.get();
+  const s = await window.rejsudai.settings.get();
   for (const [key, id] of Object.entries(SETTING_FIELDS)) $(`#${id}`).value = s[key] ?? '';
   $('#s-headless').checked = !!s.headless;
   applyTheme(s.theme);
@@ -1016,7 +1016,7 @@ $('#btn-save-aliases').addEventListener('click', async () => {
   let saved;
   try {
     // Rejects on a malformed or duplicated alias code, naming the offender.
-    saved = await window.rejsud.settings.save(patch);
+    saved = await window.rejsudai.settings.save(patch);
   } catch (err) {
     flash('#aliases-msg', clean(err), 'err');
     return;
@@ -1035,7 +1035,7 @@ $('#btn-save-settings').addEventListener('click', async () => {
 
   let saved;
   try {
-    saved = await window.rejsud.settings.save(patch);
+    saved = await window.rejsudai.settings.save(patch);
   } catch (err) {
     flash('#settings-msg', clean(err), 'err');
     return;
@@ -1048,7 +1048,7 @@ $('#btn-save-settings').addEventListener('click', async () => {
 document.querySelectorAll('[data-pick]').forEach(btn => {
   btn.addEventListener('click', async () => {
     const input = $(`#${btn.dataset.pick}`);
-    const dir = await window.rejsud.dialog.pickDirectory({ title: btn.dataset.pickTitle, defaultPath: input.value });
+    const dir = await window.rejsudai.dialog.pickDirectory({ title: btn.dataset.pickTitle, defaultPath: input.value });
     if (dir) input.value = dir;
   });
 });
@@ -1083,7 +1083,7 @@ let credsReady = false;
 let credsGate = false;
 
 async function loadCredStatus() {
-  const st = await window.rejsud.credentials.status();
+  const st = await window.rejsudai.credentials.status();
   for (const key of Object.keys(CRED_FIELDS)) {
     const node = document.querySelector(`[data-state-for="${key}"]`);
     const where = st[key];
@@ -1123,7 +1123,7 @@ $('#btn-save-creds').addEventListener('click', async () => {
   }
   if (!Object.keys(patch).length) return flash('#creds-msg', 'Nothing to save.', '');
   try {
-    await window.rejsud.credentials.save(patch);
+    await window.rejsudai.credentials.save(patch);
     for (const id of Object.values(CRED_FIELDS)) $(`#${id}`).value = '';
     await loadCredStatus();
     flash('#creds-msg', 'Saved to Keychain.', 'ok');
@@ -1138,7 +1138,7 @@ $('#btn-save-creds').addEventListener('click', async () => {
 
 $('#btn-import-env').addEventListener('click', async () => {
   try {
-    await window.rejsud.credentials.importEnv();
+    await window.rejsudai.credentials.importEnv();
     await loadCredStatus();
     flash('#creds-msg', 'Imported into the Keychain.', 'ok');
   } catch (err) {
@@ -1156,7 +1156,7 @@ function refreshBrowserStatus() {
 }
 
 async function probeBrowser() {
-  const st = await window.rejsud.browser.status();
+  const st = await window.rejsudai.browser.status();
   const node = $('#browser-status');
   const badge = $('#browser-badge');
   if (st.installed) {
@@ -1181,7 +1181,7 @@ $('#btn-install-browser').addEventListener('click', async () => {
   btn.disabled = true;
   flash('#browser-msg', 'Downloading…', '');
   try {
-    await window.rejsud.browser.install();
+    await window.rejsudai.browser.install();
     await refreshBrowserStatus();
     flash('#browser-msg', 'Chromium ready.', 'ok');
   } catch (err) {
@@ -1191,7 +1191,7 @@ $('#btn-install-browser').addEventListener('click', async () => {
   }
 });
 
-window.rejsud.onBrowserProgress(({ line }) => {
+window.rejsudai.onBrowserProgress(({ line }) => {
   $('#browser-msg').textContent = line.slice(0, 90);
   appendLog(line + '\n', 'app');
 });
@@ -1209,7 +1209,7 @@ window.rejsud.onBrowserProgress(({ line }) => {
   if (!st.installed) {
     appendLog('Chromium is not installed yet — open Settings and download it before the first run.\n', 'app');
   }
-  const info = await window.rejsud.appInfo();
-  $('#app-info').textContent = `Rejsud ${info.version} · data in ${info.userData}`;
-  setRunning(await window.rejsud.run.state());
+  const info = await window.rejsudai.appInfo();
+  $('#app-info').textContent = `Rejsudai ${info.version} · data in ${info.userData}`;
+  setRunning(await window.rejsudai.run.state());
 })();

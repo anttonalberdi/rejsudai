@@ -20,11 +20,11 @@ const EXPENSE_PURPOSE      = process.env.EXPENSE_PURPOSE      || '2 - Outside De
 // as card transactions in indfak2) from out-of-pocket ones (which don't).
 const CORPORATE_CARD       = process.env.CORPORATE_CARD       || 'SEB Eurocard (a Mastercard) — and the SEB Rejsekonto corporate travel account, which travel-agency invoices (e.g. CWT) are charged to (card references like "DC 3614...")';
 // Sending a settlement on for approval is not something the bot can take back,
-// so it is opt-in: REJSUD_SUBMIT=1 (the desktop app's toggle) or --submit on the
+// so it is opt-in: REJSUDAI_SUBMIT=1 (the desktop app's toggle) or --submit on the
 // command line. --no-submit wins over both, for a one-off draft-only run.
 const SUBMIT_SETTLEMENT = process.argv.includes('--no-submit')
   ? false
-  : (process.argv.includes('--submit') || process.env.REJSUD_SUBMIT === '1');
+  : (process.argv.includes('--submit') || process.env.REJSUDAI_SUBMIT === '1');
 
 // ---------------------------------------------------------------------------
 // SETTLEMENT FOLDER METADATA
@@ -34,7 +34,7 @@ const SUBMIT_SETTLEMENT = process.argv.includes('--no-submit')
 // it files the folder). A folder made by hand has no such file: its own name
 // becomes the settlement name and the alias falls back to EXPENSE_ALIAS.
 // ---------------------------------------------------------------------------
-const SETTLEMENT_META = '.rejsud.json';
+const SETTLEMENT_META = '.rejsudai.json';
 
 // "ai_subscription_fees" → "AI Subscription Fees". Title-case each word;
 // uppercase words of ≤2 chars (handles acronyms like AI, UK).
@@ -214,24 +214,24 @@ async function pickOption(options, context, instruction) {
 
 // ---------------------------------------------------------------------------
 // GUI BRIDGE (added for the Electron wrapper — no effect on plain CLI runs)
-// When REJSUD_GUI=1 the parent process is the desktop app, which reads stdout
+// When REJSUDAI_GUI=1 the parent process is the desktop app, which reads stdout
 // line by line. Structured events are emitted as a single line prefixed with
-// @@REJSUD so the app can show progress and find the manifest without having to
+// @@REJSUDAI so the app can show progress and find the manifest without having to
 // screen-scrape the human-readable log. Everything else is unchanged.
 // ---------------------------------------------------------------------------
-const REJSUD_GUI = process.env.REJSUD_GUI === '1';
+const REJSUDAI_GUI = process.env.REJSUDAI_GUI === '1';
 
-function rejsudEmit(event, data = {}) {
-  if (!REJSUD_GUI) return;
-  try { process.stdout.write(`@@REJSUD ${JSON.stringify({ event, ...data })}\n`); } catch {}
+function rejsudaiEmit(event, data = {}) {
+  if (!REJSUDAI_GUI) return;
+  try { process.stdout.write(`@@REJSUDAI ${JSON.stringify({ event, ...data })}\n`); } catch {}
 }
 
 // Mirrors the live page into the app's Browser pane. Frames go over Node's IPC
 // channel (the app spawns this process with one) rather than stdout, so they
 // never mix into the log. Returns a stop function, or null when there is
 // nothing to stream to — a plain CLI run has no parent to send frames to.
-async function rejsudStartScreencast(page) {
-  if (!REJSUD_GUI || typeof process.send !== 'function') return null;
+async function rejsudaiStartScreencast(page) {
+  if (!REJSUDAI_GUI || typeof process.send !== 'function') return null;
   try {
     const { startScreencast } = require('./app/lib/screencast');
     return await startScreencast(page, frame => process.send({ channel: 'frame', ...frame }));
@@ -243,9 +243,9 @@ async function rejsudStartScreencast(page) {
 
 // Asks the desktop app for a TOTP code and waits for it on stdin. Used only as
 // the no-TOTP_SECRET fallback; with a secret configured this is never reached.
-function rejsudAskGuiForOTP() {
+function rejsudaiAskGuiForOTP() {
   return new Promise((resolve, reject) => {
-    rejsudEmit('totp_request');
+    rejsudaiEmit('totp_request');
     let buf = '';
     const onData = chunk => {
       buf += chunk;
@@ -275,7 +275,7 @@ function rejsudAskGuiForOTP() {
 // call log full of selectors — which says nothing about WHAT the bot was doing
 // or what the person should fix. Every abort is therefore reported as three
 // things: the step that was running, a plain-language cause, and what to do
-// about it. The CLI prints them; the desktop app gets them as a @@REJSUD
+// about it. The CLI prints them; the desktop app gets them as a @@REJSUDAI
 // `error` event and shows them on the settlement card.
 // ---------------------------------------------------------------------------
 let CURRENT_STEP = { step: 'start', label: 'starting up' };
@@ -285,7 +285,7 @@ let CURRENT_STEP = { step: 'start', label: 'starting up' };
 // status line.
 function setStep(step, label) {
   CURRENT_STEP = { step, label };
-  rejsudEmit('step', { step, label });
+  rejsudaiEmit('step', { step, label });
 }
 
 // An error that already knows its own explanation — describeFailure() passes
@@ -293,7 +293,7 @@ function setStep(step, label) {
 // failure than the stack trace does.
 function failure(title, { detail = null, hint = null } = {}) {
   const err = new Error(title);
-  err.rejsud = { title, detail, hint };
+  err.rejsudai = { title, detail, hint };
   return err;
 }
 
@@ -322,7 +322,7 @@ function describeFailure(err) {
   const first = raw.split('\n')[0].trim();
   const step = CURRENT_STEP;
   const at = { step: step.step, while: step.label, raw };
-  if (err && err.rejsud) return { ...at, ...err.rejsud };
+  if (err && err.rejsudai) return { ...at, ...err.rejsudai };
 
   const say = (title, hint, detail = first) => ({ ...at, title, detail, hint });
 
@@ -383,24 +383,24 @@ function describeFailure(err) {
 // be null — failures before the browser is up still get reported, just without
 // a screenshot.
 async function reportFailure(page, err) {
-  if (err && err.rejsudReported) return;
+  if (err && err.rejsudaiReported) return;
   const info = describeFailure(err);
   let screenshot = null;
   if (page) {
-    const target = path.join(os.tmpdir(), `rejsud-failure-${Date.now()}.png`);
+    const target = path.join(os.tmpdir(), `rejsudai-failure-${Date.now()}.png`);
     const ok = await page.screenshot({ path: target, fullPage: true }).then(() => true).catch(() => false);
     if (ok) screenshot = target;
   }
   // The call log is the useful part of a Playwright message, but it can run for
   // pages; the app shows this verbatim, so keep it to the top of the trace.
   const raw = info.raw.split('\n').slice(0, 8).join('\n').slice(0, 800);
-  rejsudEmit('error', { ...info, raw, screenshot });
+  rejsudaiEmit('error', { ...info, raw, screenshot });
   console.error(`\n✖ ${info.title}`);
   console.error(`  While: ${info.while}`);
   if (info.detail && info.detail !== info.title) console.error(`  Detail: ${info.detail}`);
   if (info.hint) console.error(`  → ${info.hint}`);
   if (screenshot) console.error(`  Screenshot: ${screenshot}`);
-  if (err) err.rejsudReported = true;
+  if (err) err.rejsudaiReported = true;
   return { ...info, screenshot };
 }
 
@@ -420,7 +420,7 @@ async function getOTP() {
   // No TOTP_SECRET configured. Under the desktop app, ask the GUI for a code
   // (a terminal readline prompt would hang a windowed app with no visible
   // prompt); on the CLI keep the original interactive prompt.
-  if (REJSUD_GUI) return rejsudAskGuiForOTP();
+  if (REJSUDAI_GUI) return rejsudaiAskGuiForOTP();
   const readline = require('readline').createInterface({ input: process.stdin, output: process.stderr });
   return new Promise(resolve => {
     readline.question('Enter TOTP code from your authenticator app: ', code => { readline.close(); resolve(code.trim()); });
@@ -1292,7 +1292,7 @@ async function allocateAndUpload(page, inner, invoicePath, opts = {}) {
   const lineErrors = await saveLineAndVerify(inner, `line save (${path.basename(invoicePath)})`);
   if (lineErrors.length) {
     console.warn(`  ⚠ ${lineErrors.join(' | ')}`);
-    await page.screenshot({ path: `/tmp/rejsud-save-fail-${Date.now()}.png`, fullPage: true }).catch(() => {});
+    await page.screenshot({ path: `/tmp/rejsudai-save-fail-${Date.now()}.png`, fullPage: true }).catch(() => {});
     // Discard the unsaved form so the next expense starts from the line-items tab
     await closeAllocationDialogIfOpen(inner);
   } else {
@@ -1405,7 +1405,7 @@ async function createNormalCostLine(page, inner, invoice, uploadPath, opts = {})
 
   const lineErrors = await saveLineAndVerify(inner, `normal-cost save (${invoice.vendor})`);
   if (lineErrors.length) {
-    await page.screenshot({ path: `/tmp/rejsud-save-fail-${Date.now()}.png`, fullPage: true }).catch(() => {});
+    await page.screenshot({ path: `/tmp/rejsudai-save-fail-${Date.now()}.png`, fullPage: true }).catch(() => {});
     await closeAllocationDialogIfOpen(inner).catch(() => {});
   }
   await new Promise(r => setTimeout(r, 600));
@@ -1420,7 +1420,7 @@ async function createNormalCostLine(page, inner, invoice, uploadPath, opts = {})
 // SINGLE-FILE RUN
 // ---------------------------------------------------------------------------
 async function runSingle(page, invoicePath) {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rejsud-'));
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rejsudai-'));
   const prep = await prepareFile(invoicePath, tmpDir);
   const invoice = await parseInvoice(prep.parsePath);
   console.log('Invoice details:', invoice);
@@ -1492,7 +1492,7 @@ async function runSingle(page, invoicePath) {
         submitState.errors    = res.errors;
         if (!res.submitted) console.log(`  ⚠ Not submitted: ${res.errors.join(' | ')}`);
       }
-      rejsudEmit('submit', submitState);
+      rejsudaiEmit('submit', submitState);
       manifest.submit = submitState;
       if (submitState.submitted) {
         manifest.status = 'submitted';
@@ -1503,7 +1503,7 @@ async function runSingle(page, invoicePath) {
 
   const manifestPath = path.join(CLAIMS_OUTPUT, `${invoice.date}_${invoice.vendor.replace(/[^a-z0-9]/gi, '_')}_${Date.now()}.json`);
   fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
-  rejsudEmit('manifest', { output_folder: CLAIMS_OUTPUT, manifest: manifestPath });
+  rejsudaiEmit('manifest', { output_folder: CLAIMS_OUTPUT, manifest: manifestPath });
   console.log(`  Manifest: ${manifestPath}`);
   fs.rmSync(tmpDir, { recursive: true, force: true });
 }
@@ -1578,7 +1578,7 @@ async function findSubmitControl(inner, { wizard = false } = {}) {
 
 async function submitSettlement(page, outer, inner, draftName) {
   setStep('submit', 'sending the settlement for approval');
-  rejsudEmit('phase', { phase: 'submitting' });
+  rejsudaiEmit('phase', { phase: 'submitting' });
   console.log(`\nSubmitting "${draftName}" for approval...`);
 
   // A cost form left open would swallow the click, and a toast would intercept it.
@@ -1706,7 +1706,7 @@ async function runFolder(page, folderPath) {
   console.log(`  Settlement name: ${settlementName}`);
   console.log(`  Documents found: ${files.length}`);
 
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rejsud-'));
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rejsudai-'));
   try {
     await runFolderInner(page, folderPath, folderName, alias, settlementName, files, tmpDir);
   } finally {
@@ -1717,9 +1717,9 @@ async function runFolder(page, folderPath) {
 async function runFolderInner(page, folderPath, folderName, alias, settlementName, files, tmpDir) {
   // Parse all documents up-front (before opening the browser flow)
   const docs = [];
-  rejsudEmit('phase', { phase: 'parsing', total: files.length });
+  rejsudaiEmit('phase', { phase: 'parsing', total: files.length });
   for (const f of files) {
-    rejsudEmit('progress', { phase: 'parsing', index: docs.length + 1, total: files.length, file: path.basename(f) });
+    rejsudaiEmit('progress', { phase: 'parsing', index: docs.length + 1, total: files.length, file: path.basename(f) });
     setStep('parsing', `reading ${path.basename(f)}`);
     console.log(`  Parsing ${path.basename(f)}...`);
     const prep = await prepareFile(f, tmpDir);
@@ -1729,7 +1729,7 @@ async function runFolderInner(page, folderPath, folderName, alias, settlementNam
   }
 
   // Plan the settlement: card expense / out-of-pocket expense / supporting doc
-  rejsudEmit('phase', { phase: 'planning' });
+  rejsudaiEmit('phase', { phase: 'planning' });
   setStep('planning', 'working out what each document is');
   const { travel } = await planSettlement(docs, settlementName);
   console.log('\nSettlement plan:');
@@ -1796,9 +1796,9 @@ async function runFolderInner(page, folderPath, folderName, alias, settlementNam
 
   // Process each expense into the draft
   const results = [];
-  rejsudEmit('phase', { phase: 'filing', total: expenses.length });
+  rejsudaiEmit('phase', { phase: 'filing', total: expenses.length });
   for (const doc of expenses) {
-    rejsudEmit('progress', { phase: 'filing', index: results.length + 1, total: expenses.length, file: path.basename(doc.filePath), role: doc.role });
+    rejsudaiEmit('progress', { phase: 'filing', index: results.length + 1, total: expenses.length, file: path.basename(doc.filePath), role: doc.role });
     console.log(`\nProcessing: ${path.basename(doc.filePath)} [${doc.role}] (${doc.vendor} ${doc.amount} ${doc.currency})`);
     const docInfo = {
       file: path.basename(doc.filePath),
@@ -1880,7 +1880,7 @@ async function runFolderInner(page, folderPath, folderName, alias, settlementNam
       const info = describeFailure(err);
       console.error(`  ✗ Failed on ${docInfo.file}: ${info.title}`);
       if (info.hint) console.error(`    → ${info.hint}`);
-      const shot = path.join(os.tmpdir(), `rejsud-fail-${docInfo.file.replace(/[^a-z0-9]/gi, '_')}.png`);
+      const shot = path.join(os.tmpdir(), `rejsudai-fail-${docInfo.file.replace(/[^a-z0-9]/gi, '_')}.png`);
       const shotOk = await page.screenshot({ path: shot, fullPage: true }).then(() => true).catch(() => false);
       if (extras.length) { pendingSupport = extras; supportAttachedTo = null; }
       results.push({
@@ -1920,7 +1920,7 @@ async function runFolderInner(page, folderPath, folderName, alias, settlementNam
       if (!res.submitted) console.log(`  ⚠ Not submitted: ${res.errors.join(' | ')}`);
     }
   }
-  rejsudEmit('submit', submitState);
+  rejsudaiEmit('submit', submitState);
   console.log(submitState.submitted
     ? '  Status: SUBMITTED (sent for approval)'
     : '  Status: DRAFT (not submitted — please review and submit manually)');
@@ -1969,7 +1969,7 @@ async function runFolderInner(page, folderPath, folderName, alias, settlementNam
   fs.writeFileSync(path.join(outputFolderPath, 'manifest.json'), JSON.stringify(manifest, null, 2));
   // Tell the desktop app exactly where the results landed (it reads the
   // manifest for the per-settlement result view and the "open folder" button).
-  rejsudEmit('manifest', { output_folder: outputFolderPath, manifest: path.join(outputFolderPath, 'manifest.json') });
+  rejsudaiEmit('manifest', { output_folder: outputFolderPath, manifest: path.join(outputFolderPath, 'manifest.json') });
 
   // Move only the PROCESSED files into the output folder — a file in
   // claims-output means it actually made it into the settlement. Unprocessed
@@ -2009,7 +2009,7 @@ async function run() {
     console.error('Usage: node bot.js <invoice-file> [--submit|--no-submit]');
     console.error('       node bot.js <folder>          e.g. ai_subscription_fees');
     console.error('  --submit     send the settlement for approval when everything filed cleanly');
-    console.error('  --no-submit  leave it as a draft even if REJSUD_SUBMIT=1 (the default)');
+    console.error('  --no-submit  leave it as a draft even if REJSUDAI_SUBMIT=1 (the default)');
     process.exit(1);
   }
   if (SUBMIT_SETTLEMENT) console.log('Submit mode: the settlement will be sent for approval if everything files cleanly.');
@@ -2017,12 +2017,12 @@ async function run() {
   const targetPath = path.isAbsolute(arg) ? arg : path.join(RECEIPTS_INBOX, arg);
   const isFolder   = fs.existsSync(targetPath) && fs.statSync(targetPath).isDirectory();
 
-  // Visible browser stays the default (REJSUD_HEADLESS unset === headless:false),
+  // Visible browser stays the default (REJSUDAI_HEADLESS unset === headless:false),
   // so CLI behaviour is unchanged; the desktop app's Settings toggle sets it to 1.
-  const browser = await chromium.launch({ headless: process.env.REJSUD_HEADLESS === '1', slowMo: 700 });
+  const browser = await chromium.launch({ headless: process.env.REJSUDAI_HEADLESS === '1', slowMo: 700 });
   const page    = await browser.newPage();
   // GUI only: stream the page to the desktop app's Browser pane.
-  const stopScreencast = await rejsudStartScreencast(page);
+  const stopScreencast = await rejsudaiStartScreencast(page);
 
   try {
     setStep('login', 'signing in to indfak2');

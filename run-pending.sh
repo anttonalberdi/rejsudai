@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cd /home/anttonalberdi/rejsud-bot
+cd /home/anttonalberdi/rejsudai-bot
 
 # Load RECEIPTS_INBOX from .env if present
 RECEIPTS_INBOX="${RECEIPTS_INBOX:-/home/anttonalberdi/macos_shared/receipts-inbox}"

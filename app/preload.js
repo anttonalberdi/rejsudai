@@ -11,7 +11,7 @@ const on = (channel, fn) => {
   return () => ipcRenderer.removeListener(channel, listener);
 };
 
-contextBridge.exposeInMainWorld('rejsud', {
+contextBridge.exposeInMainWorld('rejsudai', {
   settings: {
     get: () => ipcRenderer.invoke('settings:get'),
     save: patch => ipcRenderer.invoke('settings:save', patch),

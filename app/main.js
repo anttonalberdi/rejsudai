@@ -43,7 +43,7 @@ function createWindow() {
     height: 760,
     minWidth: 820,
     minHeight: 560,
-    title: 'Rejsud',
+    title: 'Rejsudai',
     titleBarStyle: 'hiddenInset',
     backgroundColor: nativeTheme.shouldUseDarkColors ? WINDOW_BG.dark : WINDOW_BG.light,
     show: false,

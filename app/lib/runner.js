@@ -12,7 +12,7 @@ const settingsStore = require('./settings');
 const credentials = require('./credentials');
 const browsers = require('./browsers');
 
-const EVENT_PREFIX = '@@REJSUD ';
+const EVENT_PREFIX = '@@REJSUDAI ';
 
 class Runner extends EventEmitter {
   constructor() {
@@ -81,9 +81,9 @@ class Runner extends EventEmitter {
       EXPENSE_PURPOSE: settings.expensePurpose,
       CORPORATE_CARD: settings.corporateCard,
       // Added by the wrapper: structured events, GUI 2FA, headless toggle.
-      REJSUD_GUI: '1',
-      REJSUD_HEADLESS: settings.headless ? '1' : '0',
-      REJSUD_SUBMIT: submit ? '1' : '0',
+      REJSUDAI_GUI: '1',
+      REJSUDAI_HEADLESS: settings.headless ? '1' : '0',
+      REJSUDAI_SUBMIT: submit ? '1' : '0',
       PLAYWRIGHT_BROWSERS_PATH: browsersPath,
     };
 

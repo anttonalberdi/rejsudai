@@ -14,4 +14,6 @@ out/
 .claude/settings.local.json
 
 # Source zip — contains a .env with real credentials
+# Both names: the old one is kept so a pre-rename zip stays ignored.
 rejsud-bot.zip
+rejsudai-bot.zip
