@@ -20,22 +20,7 @@ file.
 
 ## [Unreleased]
 
-### Added
-
-- **Intel Macs are supported.** A release now carries two `.dmg`s — the existing
-  `Rejsudai-<version>-arm64.dmg` for Apple silicon and a new
-  `Rejsudai-<version>-x64.dmg` for Intel Macs (an 8-core Core i9 MacBook Pro,
-  say). `npm run dist` builds both from either kind of Mac: nothing in the app
-  compiles natively, so electron-builder only fetches the matching Electron
-  binary. The release workflow uploads both from its one Apple-silicon runner.
-
-### Changed
-
-- `dmg.artifactName` is set explicitly so the Intel `.dmg` is named `-x64`;
-  electron-builder's default drops the architecture for x64 and would have
-  shipped an unlabelled `Rejsudai-<version>.dmg` next to the arm64 one.
-- README's download section now names both files and how to tell which Mac you
-  have.
+_Nothing yet._
 
 ---
 
@@ -47,7 +32,7 @@ _The first release: the indfak2 automation as a macOS app._
 
 **The app**
 
-- macOS window (Electron, Apple silicon) with three tabs — **Settlements**,
+- macOS window (Electron, Apple silicon and Intel) with three tabs — **Settlements**,
   **Aliases**, **Settings**. No terminal, no Claude Code, no agent permissions.
 - **New settlement**: name it, pick its project alias from your library or add
   one inline, and drop receipts in — or point at a folder and use everything
@@ -141,15 +126,20 @@ _The first release: the indfak2 automation as a macOS app._
 
 **Build and distribution**
 
-- `npm run dist` produces an unsigned `Rejsudai-<version>-arm64.dmg` and
-  `Rejsudai.app`; Chromium is deliberately not bundled.
+- `npm run dist` produces two unsigned `.dmg`s — `Rejsudai-<version>-arm64.dmg`
+  for Apple silicon and `Rejsudai-<version>-x64.dmg` for Intel — plus the
+  `Rejsudai.app` behind each; Chromium is deliberately not bundled. Both build
+  from either kind of Mac: nothing here compiles natively, so electron-builder
+  only fetches the matching Electron binary. `dmg.artifactName` is set
+  explicitly because electron-builder's default drops the architecture for x64
+  and would ship an unlabelled `.dmg` beside the arm64 one.
 - `asar` is disabled — the automation runs as a plain-Node child process, which
   cannot read files inside an asar archive.
 - Hardened-runtime entitlements in `build/entitlements.mac.plist`, ready for a
   Developer ID if the build is ever signed.
-- GitHub Actions release workflow builds the `.dmg` on an Apple-silicon runner
-  and uploads it whenever a release is published; `workflow_dispatch` rebuilds
-  one by hand.
+- GitHub Actions release workflow builds both `.dmg`s on one Apple-silicon
+  runner (the Intel one as a cross-build) and uploads them whenever a release is
+  published; `workflow_dispatch` rebuilds a release by hand.
 - App icon and top-bar mark from `build/icon.svg`, rasterised by
   `node build/render-icon.js`.
 
@@ -164,7 +154,7 @@ _The first release: the indfak2 automation as a macOS app._
 
 ### Known limitations
 
-- macOS on Apple silicon only.
+- macOS 13 or later, on Apple silicon or Intel.
 - The build is unsigned, so a fresh install needs
   `xattr -dr com.apple.quarantine /Applications/Rejsudai.app` once — including
   after each update.

@@ -25,8 +25,8 @@ No terminal. No setup beyond filling in your credentials once.
    | Apple silicon — M1, M2, M3, M4 | `Rejsudai-<version>-arm64.dmg` |
    | Intel — e.g. a Core i9 MacBook Pro | `Rejsudai-<version>-x64.dmg` |
 
-   Not sure which you have?  → **About This Mac**: the *Chip* line says
-   Apple M-something, the *Processor* line says Intel.
+   Not sure which you have? Apple menu → **About This Mac**: an Apple-silicon
+   Mac shows a *Chip* line (Apple M1, M2, …), an Intel Mac a *Processor* line.
 2. Open it and drag **Rejsudai** into your Applications folder.
 3. The app is not signed with an Apple developer certificate, so macOS will
    refuse to open it the first time — possibly saying it is *damaged*. It isn't.
@@ -41,8 +41,10 @@ No terminal. No setup beyond filling in your credentials once.
 
 ## Before you start
 
-You need two things:
+You need three things:
 
+- **A Mac running macOS 13 (Ventura) or later** — Apple silicon or Intel, both
+  are supported.
 - **An indfak2 account with two-factor authentication** set up.
 - **An Anthropic API key**, which is what reads your receipts. Create one at
   [console.anthropic.com](https://console.anthropic.com/settings/keys) →
