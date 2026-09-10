@@ -21,6 +21,7 @@ class Runner extends EventEmitter {
     this.queue = [];
     this.current = null;
     this.cancelled = false;
+    this.submit = false;
     this.redactions = [];
   }
 
@@ -36,14 +37,26 @@ class Runner extends EventEmitter {
     return out;
   }
 
+  // A failure report is shown in the UI and copied out of it, so every string
+  // in it goes through the same redaction as the log.
+  redactFailure(failure) {
+    if (!failure) return null;
+    const out = {};
+    for (const [k, v] of Object.entries(failure)) out[k] = typeof v === 'string' ? this.redact(v) : v;
+    return out;
+  }
+
   log(settlementId, stream, text) {
     this.emit('log', { settlementId, stream, text: this.redact(text) });
   }
 
-  async start(settlements) {
+  // options.submit decides whether bot.js sends each settlement for approval;
+  // it comes from the run toolbar, which starts from the saved setting.
+  async start(settlements, options = {}) {
     if (this.busy) throw new Error('A run is already in progress.');
 
     const settings = settingsStore.read();
+    const submit = options.submit === undefined ? !!settings.submitAfterFiling : !!options.submit;
     const creds = credentials.resolve();
     const missing = credentials.KEYS.filter(k => !creds[k]);
     if (missing.length) {
@@ -52,6 +65,7 @@ class Runner extends EventEmitter {
 
     this.redactions = credentials.secretValues();
     this.cancelled = false;
+    this.submit = submit;
     this.queue = settlements.slice();
 
     const browsersPath = await browsers.resolvePath();
@@ -69,6 +83,7 @@ class Runner extends EventEmitter {
       // Added by the wrapper: structured events, GUI 2FA, headless toggle.
       REJSUD_GUI: '1',
       REJSUD_HEADLESS: settings.headless ? '1' : '0',
+      REJSUD_SUBMIT: submit ? '1' : '0',
       PLAYWRIGHT_BROWSERS_PATH: browsersPath,
     };
 
@@ -79,6 +94,7 @@ class Runner extends EventEmitter {
   state() {
     return {
       busy: this.busy,
+      submit: !!this.submit,
       currentId: this.current ? this.current.id : null,
       queued: this.queue.map(s => s.id),
     };
@@ -100,17 +116,27 @@ class Runner extends EventEmitter {
     this.current = settlement;
     this.manifestPath = null;
     this.lastError = null;
+    this.lastFailure = null;
     this.emit('settlement', { id: settlement.id, status: 'running' });
     this.emit('state', this.state());
     this.log(settlement.id, 'app', `\n=== Processing: ${settlement.folder} ===\n`);
 
     // bot.js resolves a bare name against RECEIPTS_INBOX and takes absolute
     // paths as-is, so an absolute path works for folders anywhere.
-    const child = spawnNode('bot.js', [settlement.path], this.env);
+    const child = spawnNode('bot.js', [settlement.path], this.env, { ipc: true });
     this.child = child;
 
     this.pipe(child.stdout, 'stdout', settlement);
     this.pipe(child.stderr, 'stderr', settlement);
+
+    // Live browser frames arrive over the IPC channel rather than stdout, so
+    // they stay out of the log and out of the redaction pass (a base64 JPEG
+    // cannot contain a credential).
+    child.on('message', msg => {
+      if (msg && msg.channel === 'frame') {
+        this.emit('frame', { settlementId: settlement.id, data: msg.data, width: msg.width, height: msg.height });
+      }
+    });
 
     child.on('error', err => {
       this.lastError = err.message;
@@ -119,13 +145,18 @@ class Runner extends EventEmitter {
 
     child.on('close', code => {
       this.child = null;
+      this.emit('frame-end', { settlementId: settlement.id });
       const cancelled = this.cancelled;
       const manifest = this.readManifest(this.manifestPath);
+      // bot.js explains its own failures (what step, what cause, what to do);
+      // `lastError` is only the fallback for a crash that never got that far.
+      const failure = code === 0 ? null : this.redactFailure(this.lastFailure);
       this.emit('settlement', {
         id: settlement.id,
         status: cancelled ? 'cancelled' : code === 0 ? 'done' : 'error',
         exitCode: code,
-        error: code === 0 ? null : this.lastError || `Automation exited with code ${code}.`,
+        error: code === 0 ? null : (failure && failure.title) || this.lastError || `Automation exited with code ${code}.`,
+        failure,
         manifestPath: this.manifestPath,
         outputFolder: this.manifestPath ? path.dirname(this.manifestPath) : null,
         manifest,
@@ -162,6 +193,7 @@ class Runner extends EventEmitter {
         return;
       }
       if (payload.event === 'manifest') this.manifestPath = payload.manifest;
+      if (payload.event === 'error') this.lastFailure = payload;
       if (payload.event === 'totp_request') this.emit('totp-request', { settlementId: settlement.id });
       this.emit('progress', { settlementId: settlement.id, ...payload });
       return;

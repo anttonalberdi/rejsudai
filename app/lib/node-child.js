@@ -13,7 +13,10 @@ const { app } = require('electron');
 // files inside an asar archive).
 const appRoot = () => app.getAppPath();
 
-function spawnNode(scriptRelPath, args, extraEnv = {}) {
+// `ipc: true` adds Node's IPC channel as a fourth stdio slot, giving the child
+// a process.send() for structured payloads that would swamp the log — only the
+// live browser frames use it. Left off elsewhere so nothing else changes.
+function spawnNode(scriptRelPath, args, extraEnv = {}, { ipc = false } = {}) {
   const script = path.join(appRoot(), scriptRelPath);
   return spawn(process.execPath, [script, ...args], {
     cwd: appRoot(),
@@ -24,7 +27,7 @@ function spawnNode(scriptRelPath, args, extraEnv = {}) {
       ELECTRON_NO_ATTACH_CONSOLE: '1',
       ...extraEnv,
     },
-    stdio: ['pipe', 'pipe', 'pipe'],
+    stdio: ipc ? ['pipe', 'pipe', 'pipe', 'ipc'] : ['pipe', 'pipe', 'pipe'],
   });
 }
 

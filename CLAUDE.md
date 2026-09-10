@@ -5,8 +5,10 @@
 > Everything below still describes `bot.js` itself, which is unchanged as an
 > automation and still runs standalone as `node bot.js <folder>`. The only edits
 > made for the app — a `@@REJSUD` progress emitter, a GUI 2FA prompt replacing
-> the terminal `readline` fallback, and a `REJSUD_HEADLESS` toggle — are inert
-> unless `REJSUD_GUI=1` is set, and are marked with comments in the source.
+> the terminal `readline` fallback, a `REJSUD_HEADLESS` toggle, and a CDP
+> screencast (`app/lib/screencast.js`) that mirrors the page into the app's
+> Browser pane — are inert unless `REJSUD_GUI=1` is set, and are marked with
+> comments in the source.
 
 
 Playwright + Claude API automation that logs into **indfak2.dk** (KU's indfak2 expense system), creates expense report drafts, matches card transactions, and attaches invoice PDFs.
@@ -16,18 +18,25 @@ Playwright + Claude API automation that logs into **indfak2.dk** (KU's indfak2 e
 ```bash
 cp .env.example .env   # fill in credentials
 npm install
-node bot.js 1240351001-ai_subscription_fees   # folder mode
+node bot.js ai_subscription_fees               # folder mode
 node bot.js invoice.pdf                        # single-file mode
+node bot.js ai_subscription_fees --submit      # file, then send for approval
 ```
 
 ## Modes
 
 ### Folder mode
 ```
-node bot.js <alias>-<settlement_name>
+node bot.js <settlement_folder>
 ```
 - Folder must exist under `RECEIPTS_INBOX` (default: `~/macos_shared/receipts-inbox/`)
-- Folder name format: `<alias>-<name_with_underscores>` — e.g. `1240351001-ai_subscription_fees`
+- The folder is named after the settlement and nothing else. What its name cannot
+  carry — the project alias, and the settlement name exactly as it was typed —
+  lives in a `.rejsud.json` written beside the receipts by the desktop app:
+  `{ "name": "AI Subscription Fees", "alias": "1240351001" }`. A folder made by
+  hand has no such file: its own name becomes the settlement name
+  (`ai_subscription_fees` → `AI Subscription Fees`) and the alias falls back to
+  `EXPENSE_ALIAS` / `EXPENSE_ALIAS_OPTION`.
 - Accepts PDFs, PNG/JPEG, and **HEIC photos of physical receipts** (converted to
   JPEG via `heic-convert` for both Claude parsing and indfak2 upload)
 - Creates **one draft** named `* <Settlement Name>` for all documents inside
@@ -56,6 +65,40 @@ node bot.js <alias>-<settlement_name>
     `moved_to_output`
   - `supporting_documents[]` — per supporting file: `attached_to` (which expense
     line it was uploaded to), `moved_to_output`
+
+### Submitting (opt-in)
+
+A run ends on a **draft** unless it is told otherwise: `--submit` on the command
+line, or `REJSUD_SUBMIT=1` (what the app's "Submit for approval" toggle sets).
+`--no-submit` overrides both.
+
+`submitSettlement()` runs after the last expense line:
+
+- **Gated on a complete settlement.** Nothing is sent while a document is
+  unfiled, a supporting document is unattached, or no line was created — a claim
+  that is missing a receipt is worse to send than to leave as a draft, and the
+  unprocessed files are still in the inbox for a re-run. Single-file mode adds
+  one more gate: a draft that was *picked* rather than created may hold unrelated
+  lines, so it is never sent.
+- **Finds the button by scored label**, not an exact name (`Send`, `Submit`,
+  `Send til godkendelse`, …), skipping Save/Cancel/Delete. When nothing scores,
+  the error lists every visible button label so the tenant's wording can be added.
+- **Walks a wizard, not a button.** Sending is multi-step on this tenant: the
+  observed sequence is **"Send (1 of 2)" → "Send"**. It clicks, re-scans (later
+  steps may be labelled `Next`/`Finish` rather than `Send`), and clicks again, up
+  to four steps; the pressed labels are recorded in `submit.button`. It stops as soon as a click changes no visible button label, so a
+  step that did not take can never loop.
+- **Confirms** only inside a real modal — a global search would find the send
+  button again and press it twice.
+- **Verifies rather than assumes**: it returns to the drafts list through the
+  outer frame's `#ecm_link` (NOT `openExpenseModule()` — after the wizard runs,
+  the top-level `Expense` button matches three elements and Playwright's strict
+  mode throws) and checks the settlement has left the list. Still listed, or an
+  `Errors count: N` banner appeared, and it reports "not submitted" and leaves
+  the draft alone.
+- Records the outcome in `settlement.submit`
+  (`requested` / `submitted` / `skipped_reason` / `button` / `errors`) and in
+  `settlement.status` (`SUBMITTED — sent for approval`).
 
 ### Complex settlements (trips: mixed invoices, receipt photos, out-of-pocket costs)
 
@@ -99,8 +142,9 @@ Key behaviors this enables:
 - **Crash resume**: if a draft named `* <Settlement Name>` already exists, a
   re-run enters it instead of creating a duplicate. One failing expense no longer
   aborts the run — the error is recorded in the manifest (`errors`), a screenshot
-  is saved to `/tmp/rejsud-fail-<file>.png`, claimed supporting docs are returned
-  to the pending pool, and processing continues. Files already in the draft from
+  is saved next to the other temp files (`os.tmpdir()/rejsud-fail-<file>.png`,
+  its path recorded in the manifest so the app can open it), claimed supporting
+  docs are returned to the pending pool, and processing continues. Files already in the draft from
   a crashed run should be removed from the inbox folder by hand before re-running.
 - Processing order: card/unknown expenses first, pocket expenses last — an
   unmatched card search leaves the allocation dialog open for reuse, and the
@@ -140,6 +184,7 @@ clicking Delete unless the selected-row count exactly matches the rows found.
 | `EXPENSE_TYPE` | `1 -Settlement` | Dropdown partial match for Type field (non-travel folders; trips auto-select Type 2) |
 | `EXPENSE_PURPOSE` | `2 - Outside Denmark` | Dropdown partial match for Purpose field (non-travel; trips derive it from the destination) |
 | `CORPORATE_CARD` | `SEB Eurocard (a Mastercard, issued by SEB)` | Card description used by the settlement plan to tell corporate-card receipts from out-of-pocket ones |
+| `REJSUD_SUBMIT` | unset (draft) | `1` sends a cleanly filed settlement for approval; same as `--submit` |
 
 ## Architecture
 
@@ -147,7 +192,8 @@ clicking Delete unless the selected-row count exactly matches the rows found.
 run()
  ├─ login(page)                          TOTP + credentials
  ├─ runFolder(page, folderPath)
- │   ├─ parseFolderName()                alias + title-cased settlement name
+ │   ├─ readSettlementMeta()             alias + settlement name (.rejsud.json,
+ │   │                                    falling back to the folder name)
  │   ├─ prepareFile() × N               HEIC → JPEG (tmp dir, cleaned up after)
  │   ├─ parseInvoice() × N              Claude vision → {document_kind, vendor, date,
  │   │                                    amount, currency, payment_method, references, keywords}
@@ -167,6 +213,9 @@ run()
  │       ├─ createNormalCostLine         pocket, or unknown with no match → "Normal Cost"
  │       │                                (date/amount/currency/cost type/means of payment)
  │       └─ saveLineAndVerify            every line save verified (form must close)
+ │   ├─ submitSettlement()            only with --submit/REJSUD_SUBMIT=1, and only
+ │   │                                    when nothing was left unfiled; verified by
+ │   │                                    re-reading the drafts list
  │   └─ write manifest, copy processed files, rmSync inbox folder when empty
  └─ runSingle(page, invoicePath)
      ├─ prepareFile() + parseInvoice()
@@ -183,6 +232,43 @@ falling back to `li:nth-child(1)`), `closeAllocationDialogIfOpen()` (Cancel/clos
 button — never Escape), `uploadAttachment()` (Upload attachment → file chooser →
 Description → dialog Save; called once per attachment, so one line can carry the
 invoice plus supporting documents).
+
+## Failure reporting
+
+A Playwright abort (`locator.waitFor: Timeout 10000ms exceeded` + a call log of
+selectors) says nothing about what the bot was doing, so every failure is
+translated before it leaves `bot.js`:
+
+- `setStep(step, label)` is called at each stage that can fail on its own —
+  `login`, `expense_module`, `draft`, `alias`, `parsing`, `planning`,
+  `transactions`, `line`, `submit`. Labels are lowercase gerunds written to read
+  mid-sentence (*"Timed out while &lt;label&gt;"*) and are also emitted as a
+  `@@REJSUD step` event, which drives the app's live status line. Never
+  `toLowerCase()` a label — they carry names (`CWT`, `Expense module`).
+- `failure(title, { detail, hint })` throws an error that already knows its own
+  explanation (`err.rejsud`); `describeFailure()` passes those through untouched.
+  Use it wherever the code knows more than the stack trace does — the alias
+  search, login, the Expense module.
+- `describeFailure(err)` → `{ title, while, detail, hint, raw, step }`. It
+  recognises environment-level causes first (network, closed browser, missing
+  Chromium, Claude 401/429/billing, ENOENT, ENOSPC), then falls back to a
+  step-aware timeout sentence built from the locator in the call log
+  (`describeTarget`). Adding a new case is one `if` in the chain.
+- `reportFailure(page, err)` screenshots the live page (before `browser.close()`
+  in `run()`'s `catch`, which is why the catch is there and not at the top
+  level), emits `@@REJSUD error`, prints the readable block, and marks the error
+  `rejsudReported` so the top-level handler does not double-report. It is called
+  again at the top level with `page = null` for failures that happen before the
+  browser exists.
+- Per-document failures inside the expense loop use the same translation: the
+  manifest gets `errors: [title]` plus `error_detail` (`while` / `detail` /
+  `hint` / `screenshot` / `raw`), and the run continues.
+- App side: `runner.js` keeps the last `error` event as `this.lastFailure`,
+  redacts every string in it, and sends it on the `settlement` event as
+  `failure` (with `error` set to its title for the old shape). The renderer's
+  `failureBlock()` draws cause → step → detail → hint, plus *Screenshot* and
+  *Technical details* buttons. `"Bot failed: <msg>"` is still parsed as the
+  fallback for a crash that never reached `reportFailure`.
 
 ## iframe structure
 
@@ -266,6 +352,7 @@ Both API calls use `cache_control: { type: "ephemeral" }`:
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
+| A failure shows as a raw `locator.waitFor: Timeout` with no explanation | The failing step has no `setStep()`, or the cause has no rule in `describeFailure` | Add the `setStep()` call, or `throw failure(...)` at the source where the code knows what went wrong |
 | `MFA failed` | Wrong `TOTP_SECRET` or clock drift | Check secret; sync system clock |
 | `#inner-draft-container` never visible | Network slow; ECM link didn't load | Bot retries 3× with 2 s gaps |
 | Purpose validation error after save | Purpose options didn't load before first save | Two-save fallback handles this automatically |
@@ -276,6 +363,7 @@ Both API calls use `cache_control: { type: "ephemeral" }`:
 | Claude vision rejects a receipt photo | HEIC format (iPhone default) | Fixed: `prepareFile()` converts HEIC → JPEG before parsing/upload |
 | Expense filed as Normal Cost but the card charge appears later | `unknown_expense` fallback fired before the transaction posted | Review the draft before submitting; delete the Normal Cost line and re-run, or wait a few days before running trip settlements |
 | Supporting doc left in inbox | No expense line succeeded in the run | Re-run after fixing matches; it attaches to the first successful line |
+| `--submit` run still ends on a draft | Something was left unfiled (the gate), or the send button was not found | Read `settlement.submit` in the manifest: `skipped_reason` names the missing piece; an `errors` entry listing visible buttons means the tenant's send button needs adding to `findSubmitControl` |
 | Normal-cost dialog fields not filled | Field labels differ from Description/Date/Amount/Currency | Check the `Normal-cost form snapshot` log line and manifest `fields_entered`; adjust locators in `createNormalCostLine` |
 | Line save fails with "Invalid date. Format: M/DD/YYYY" despite a correct-looking date | Cost date outside the draft's Departure–Arrival window, or date was `fill()`ed instead of typed | Fixed: plan supplies `trip_start`/`trip_end` for Departure/Arrival; dates typed via `typeDateInto` |
 | Line logged "Allocated" but missing from the draft | Save click swallowed / validation banner not detected (pre-`saveLineAndVerify`) | Fixed: saves are verified (form must close); failures recorded in manifest `errors`, file kept in inbox |

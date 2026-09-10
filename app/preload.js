@@ -3,7 +3,7 @@
 // nodeIntegration is off — the renderer has no fs, no child_process, and no
 // way to read a credential value (only whether one is set).
 
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 const on = (channel, fn) => {
   const listener = (_event, payload) => fn(payload);
@@ -15,6 +15,7 @@ contextBridge.exposeInMainWorld('rejsud', {
   settings: {
     get: () => ipcRenderer.invoke('settings:get'),
     save: patch => ipcRenderer.invoke('settings:save', patch),
+    addAlias: alias => ipcRenderer.invoke('settings:addAlias', alias),
   },
   credentials: {
     status: () => ipcRenderer.invoke('creds:status'),
@@ -24,12 +25,20 @@ contextBridge.exposeInMainWorld('rejsud', {
   inbox: {
     scan: () => ipcRenderer.invoke('inbox:scan'),
     describe: folderPath => ipcRenderer.invoke('inbox:describe', folderPath),
+    propose: payload => ipcRenderer.invoke('inbox:propose', payload),
+    expand: paths => ipcRenderer.invoke('inbox:expand', paths),
+    create: payload => ipcRenderer.invoke('inbox:create', payload),
+    remove: folderPath => ipcRenderer.invoke('inbox:remove', folderPath),
   },
   dialog: {
     pickDirectory: opts => ipcRenderer.invoke('dialog:pickDirectory', opts),
+    pickFiles: opts => ipcRenderer.invoke('dialog:pickFiles', opts),
   },
+  // Dropped File objects carry no path since Electron 32; this is the supported
+  // way to get one, and it is the only thing the renderer learns about a drop.
+  pathForFile: file => webUtils.getPathForFile(file),
   run: {
-    start: settlements => ipcRenderer.invoke('run:start', settlements),
+    start: (settlements, options) => ipcRenderer.invoke('run:start', { settlements, options: options || {} }),
     cancel: () => ipcRenderer.invoke('run:cancel'),
     state: () => ipcRenderer.invoke('run:state'),
     submitTotp: code => ipcRenderer.invoke('run:totp', code),
@@ -45,9 +54,6 @@ contextBridge.exposeInMainWorld('rejsud', {
     openPath: target => ipcRenderer.invoke('shell:openPath', target),
     revealPath: target => ipcRenderer.invoke('shell:revealPath', target),
   },
-  drafts: {
-    delete: namePattern => ipcRenderer.invoke('draft:delete', namePattern),
-  },
   appInfo: () => ipcRenderer.invoke('app:info'),
 
   onLog: fn => on('run:log', fn),
@@ -56,4 +62,6 @@ contextBridge.exposeInMainWorld('rejsud', {
   onRunState: fn => on('run:state', fn),
   onTotpRequest: fn => on('run:totp-request', fn),
   onBrowserProgress: fn => on('browser:progress', fn),
+  onFrame: fn => on('run:frame', fn),
+  onFrameEnd: fn => on('run:frame-end', fn),
 });

@@ -14,11 +14,14 @@ fi
 
 echo "Scanning inbox: $RECEIPTS_INBOX"
 
-# Collect folders matching <alias>-<name> pattern
+# Every settlement folder directly inside the inbox that holds something to file
 pending=()
 while IFS= read -r -d '' dir; do
   basename=$(basename "$dir")
-  if [[ "$basename" == *-* ]]; then
+  case "$basename" in .*) continue ;; esac
+  if find "$dir" -maxdepth 1 -type f \
+       \( -iname '*.pdf' -o -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.heic' \) \
+       -print -quit 2>/dev/null | grep -q .; then
     pending+=("$basename")
   fi
 done < <(find "$RECEIPTS_INBOX" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null || true)

@@ -19,23 +19,46 @@ const EXPENSE_PURPOSE      = process.env.EXPENSE_PURPOSE      || '2 - Outside De
 // Describes the corporate card so Claude can tell card-paid receipts (which appear
 // as card transactions in indfak2) from out-of-pocket ones (which don't).
 const CORPORATE_CARD       = process.env.CORPORATE_CARD       || 'SEB Eurocard (a Mastercard) — and the SEB Rejsekonto corporate travel account, which travel-agency invoices (e.g. CWT) are charged to (card references like "DC 3614...")';
+// Sending a settlement on for approval is not something the bot can take back,
+// so it is opt-in: REJSUD_SUBMIT=1 (the desktop app's toggle) or --submit on the
+// command line. --no-submit wins over both, for a one-off draft-only run.
+const SUBMIT_SETTLEMENT = process.argv.includes('--no-submit')
+  ? false
+  : (process.argv.includes('--submit') || process.env.REJSUD_SUBMIT === '1');
 
 // ---------------------------------------------------------------------------
-// FOLDER NAME PARSER
-// Expects format: <alias>-<settlement_name_with_underscores>
-// e.g. 1240351001-ai_subscription_fees → alias=1240351001, name=AI Subscription Fees
+// SETTLEMENT FOLDER METADATA
+// A folder is named after the settlement and nothing else. What the name cannot
+// carry — the project alias, and the name exactly as it was typed — lives in a
+// small JSON file written beside the receipts (the desktop app writes it when
+// it files the folder). A folder made by hand has no such file: its own name
+// becomes the settlement name and the alias falls back to EXPENSE_ALIAS.
 // ---------------------------------------------------------------------------
-function parseFolderName(folderName) {
-  const dashIdx = folderName.indexOf('-');
-  if (dashIdx < 0) return { alias: null, settlementName: folderName.replace(/_/g, ' ') };
-  const alias = folderName.slice(0, dashIdx);
-  const raw   = folderName.slice(dashIdx + 1).replace(/_/g, ' ');
-  // Title-case each word; uppercase words of ≤2 chars (handles acronyms like AI, UK)
-  const settlementName = raw
+const SETTLEMENT_META = '.rejsud.json';
+
+// "ai_subscription_fees" → "AI Subscription Fees". Title-case each word;
+// uppercase words of ≤2 chars (handles acronyms like AI, UK).
+function settlementNameFromFolder(folderName) {
+  return folderName
+    .replace(/_/g, ' ')
     .split(' ')
     .map(w => w.length <= 2 ? w.toUpperCase() : w.charAt(0).toUpperCase() + w.slice(1))
     .join(' ');
-  return { alias, settlementName };
+}
+
+function readSettlementMeta(folderPath) {
+  let meta = {};
+  try {
+    meta = JSON.parse(fs.readFileSync(path.join(folderPath, SETTLEMENT_META), 'utf8'));
+  } catch {
+    meta = {};   // no metadata, or unreadable — fall back to the folder name
+  }
+  const name  = String(meta && meta.name  || '').trim();
+  const alias = String(meta && meta.alias || '').trim();
+  return {
+    alias: alias || null,
+    settlementName: name || settlementNameFromFolder(path.basename(folderPath)),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -203,6 +226,21 @@ function rejsudEmit(event, data = {}) {
   try { process.stdout.write(`@@REJSUD ${JSON.stringify({ event, ...data })}\n`); } catch {}
 }
 
+// Mirrors the live page into the app's Browser pane. Frames go over Node's IPC
+// channel (the app spawns this process with one) rather than stdout, so they
+// never mix into the log. Returns a stop function, or null when there is
+// nothing to stream to — a plain CLI run has no parent to send frames to.
+async function rejsudStartScreencast(page) {
+  if (!REJSUD_GUI || typeof process.send !== 'function') return null;
+  try {
+    const { startScreencast } = require('./app/lib/screencast');
+    return await startScreencast(page, frame => process.send({ channel: 'frame', ...frame }));
+  } catch (err) {
+    console.error(`Live browser view unavailable: ${err.message}`);
+    return null;
+  }
+}
+
 // Asks the desktop app for a TOTP code and waits for it on stdin. Used only as
 // the no-TOTP_SECRET fallback; with a secret configured this is never reached.
 function rejsudAskGuiForOTP() {
@@ -232,6 +270,141 @@ function rejsudAskGuiForOTP() {
 }
 
 // ---------------------------------------------------------------------------
+// FAILURE REPORTING
+// A Playwright timeout reads "locator.waitFor: Timeout 10000ms exceeded" plus a
+// call log full of selectors — which says nothing about WHAT the bot was doing
+// or what the person should fix. Every abort is therefore reported as three
+// things: the step that was running, a plain-language cause, and what to do
+// about it. The CLI prints them; the desktop app gets them as a @@REJSUD
+// `error` event and shows them on the settlement card.
+// ---------------------------------------------------------------------------
+let CURRENT_STEP = { step: 'start', label: 'starting up' };
+
+// Called at each stage that can fail on its own. The label is written to be
+// read mid-sentence ("Timed out while <label>"), and doubles as the app's live
+// status line.
+function setStep(step, label) {
+  CURRENT_STEP = { step, label };
+  rejsudEmit('step', { step, label });
+}
+
+// An error that already knows its own explanation — describeFailure() passes
+// these through untouched. Use it wherever the code knows more about the
+// failure than the stack trace does.
+function failure(title, { detail = null, hint = null } = {}) {
+  const err = new Error(title);
+  err.rejsud = { title, detail, hint };
+  return err;
+}
+
+// "getByRole('link', { name: /^1241143252/ })" → 'the "1241143252" link'.
+// Playwright's call log names the locator it gave up on, which is the only
+// clue about which thing on the page never appeared.
+function describeTarget(text) {
+  if (!text) return 'the element it was waiting for';
+  const name = /name: (?:'([^']*)'|\/\^?([^/]*?)\$?\/)/.exec(text);
+  const role = /getByRole\('([a-z]+)'/.exec(text);
+  const label = /getByLabel\((?:'([^']*)'|\/([^/]*)\/)/.exec(text);
+  const css = /locator\('([^']*)'\)/.exec(text);
+  const what = name && (name[1] || name[2]);
+  if (what && role) return `the "${what}" ${role[1]}`;
+  if (what) return `"${what}"`;
+  if (label) return `the "${label[1] || label[2]}" field`;
+  if (role) return `a ${role[1]}`;
+  if (css) return `an element matching ${css[1]}`;
+  return 'the element it was waiting for';
+}
+
+// Everything a failure report needs: what broke, the evidence, and the fix.
+// `raw` is kept so the log/manifest still carries the original message.
+function describeFailure(err) {
+  const raw = ((err && err.message) || String(err)).trim();
+  const first = raw.split('\n')[0].trim();
+  const step = CURRENT_STEP;
+  const at = { step: step.step, while: step.label, raw };
+  if (err && err.rejsud) return { ...at, ...err.rejsud };
+
+  const say = (title, hint, detail = first) => ({ ...at, title, detail, hint });
+
+  // Environment-level failures come with recognizable messages and are worth
+  // catching before the generic timeout branch — they are not indfak2's fault.
+  if (/net::ERR_|ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ECONNRESET|ETIMEDOUT/i.test(raw))
+    return say('Could not reach indfak2.dk',
+      'Check the network connection (and the VPN, if this machine needs one for KU), then run again.');
+  if (/Target (page|context|browser) has been closed|Browser has been closed|browserContext\.close/i.test(raw))
+    return say('The browser closed before the run finished',
+      'If you closed the browser window, start the run again. Otherwise indfak2 ended the session.');
+  if (/Executable doesn.?t exist|playwright install/i.test(raw))
+    return say('The automation browser is missing',
+      'Open Settings and install the browser, then run again.');
+  if (/invalid x-api-key|authentication_error|permission_error/i.test(raw))
+    return say('Claude rejected the API key',
+      'Check ANTHROPIC_API_KEY in Settings — the documents cannot be read without it.');
+  if (/rate_limit_error|overloaded_error/i.test(raw))
+    return say('Claude is rate-limited or overloaded',
+      'Wait a few minutes and run the settlement again — nothing was filed.');
+  if (/credit balance|billing/i.test(raw))
+    return say('The Claude account cannot be billed',
+      'Top up the Anthropic account for this API key, then run again.');
+  if (/ENOENT|no such file or directory/i.test(raw))
+    return say('A file or folder the run needed is gone',
+      'Check that the settlement folder is still in the inbox and readable.');
+  if (/ENOSPC|no space left/i.test(raw))
+    return say('The disk is full', 'Free some space and run again.');
+
+  // Whatever is left and timed out: name the step and the thing that never
+  // showed up. This is the branch the raw Playwright message used to reach.
+  if (/Timeout \d+ms exceeded|exceeded while waiting|waiting for/i.test(raw)) {
+    const target = /waiting for (.+?)(?: to be| to appear|\n|$)/.exec(raw);
+    // "waiting for event 'response'" is indfak2 never answering, not an
+    // element that never rendered — worth saying differently.
+    const what = /waiting for event/i.test(raw)
+      ? 'indfak2 never answered'
+      : `${describeTarget(target && target[1])} never appeared`;
+    const hints = {
+      login: 'Check the username, password and 2FA secret in Settings.',
+      expense_module: 'indfak2 was slow or its Expense module did not load. Try again; if it repeats, open indfak2 in a browser and check the account still has expense access.',
+      draft: 'The draft form did not behave as expected — the screenshot shows the page when the bot gave up.',
+      alias: 'Check the alias code on the settlement and in Settings.',
+      transactions: 'The card-transaction list did not load. Try again in a few minutes.',
+      line: 'The expense line form did not behave as expected — the screenshot shows the page when the bot gave up.',
+      submit: 'The settlement is still a draft in indfak2 and can be sent by hand.',
+    };
+    return say(`Timed out while ${step.label} — ${what}`,
+      hints[step.step] || 'The page may have changed or been unusually slow. The screenshot shows what was on screen.',
+      null);
+  }
+
+  return say(`Failed while ${step.label}`,
+    'The log below and the screenshot show what happened at the moment it stopped.');
+}
+
+// Prints the readable version and hands the app a structured event. `page` may
+// be null — failures before the browser is up still get reported, just without
+// a screenshot.
+async function reportFailure(page, err) {
+  if (err && err.rejsudReported) return;
+  const info = describeFailure(err);
+  let screenshot = null;
+  if (page) {
+    const target = path.join(os.tmpdir(), `rejsud-failure-${Date.now()}.png`);
+    const ok = await page.screenshot({ path: target, fullPage: true }).then(() => true).catch(() => false);
+    if (ok) screenshot = target;
+  }
+  // The call log is the useful part of a Playwright message, but it can run for
+  // pages; the app shows this verbatim, so keep it to the top of the trace.
+  const raw = info.raw.split('\n').slice(0, 8).join('\n').slice(0, 800);
+  rejsudEmit('error', { ...info, raw, screenshot });
+  console.error(`\n✖ ${info.title}`);
+  console.error(`  While: ${info.while}`);
+  if (info.detail && info.detail !== info.title) console.error(`  Detail: ${info.detail}`);
+  if (info.hint) console.error(`  → ${info.hint}`);
+  if (screenshot) console.error(`  Screenshot: ${screenshot}`);
+  if (err) err.rejsudReported = true;
+  return { ...info, screenshot };
+}
+
+// ---------------------------------------------------------------------------
 // 2. TOTP
 // ---------------------------------------------------------------------------
 async function getOTP() {
@@ -257,6 +430,18 @@ async function getOTP() {
 // ---------------------------------------------------------------------------
 // 3. LOGIN
 // ---------------------------------------------------------------------------
+// Whatever the login page is complaining about on screen, so a rejected
+// credential is reported with the site's own wording rather than a timeout.
+async function loginPageMessage(page) {
+  try {
+    const texts = await page.locator('.alert, .error, .message, [role="alert"]').allInnerTexts();
+    const msg = texts.map(t => t.replace(/\s+/g, ' ').trim()).filter(Boolean)[0];
+    return msg ? `indfak2 says: "${msg}"` : null;
+  } catch {
+    return null;
+  }
+}
+
 async function login(page) {
   await page.goto('https://indfak2.dk/login/#/');
   await page.locator('#select_value_label_0').click();
@@ -264,13 +449,30 @@ async function login(page) {
   await page.getByRole('textbox', { name: 'User name' }).fill(process.env.INDFAK_USERNAME);
   await page.getByRole('textbox', { name: 'Password' }).fill(process.env.INDFAK_PASSWORD);
   await page.getByRole('button', { name: 'Log in' }).click();
-  await page.getByRole('textbox', { name: 'Code *' }).fill(await getOTP());
+
+  // A wrong username or password never reaches the 2FA step, so waiting for the
+  // code field is what separates "bad credentials" from "bad TOTP code".
+  const codeBox = page.getByRole('textbox', { name: 'Code *' });
+  try {
+    await codeBox.waitFor({ timeout: 20000 });
+  } catch {
+    throw failure('indfak2 did not accept the username or password.', {
+      detail: await loginPageMessage(page),
+      hint: 'Check the login email and password in Settings (Credentials).',
+    });
+  }
+  await codeBox.fill(await getOTP());
   await page.getByRole('button', { name: 'Ok' }).click();
 
   try {
     await page.getByRole('button', { name: 'Expense' }).waitFor({ timeout: 10000 });
   } catch {
-    throw new Error('MFA failed — TOTP code rejected. Check TOTP_SECRET in .env.');
+    throw failure('Two-factor code rejected.', {
+      detail: await loginPageMessage(page) || 'indfak2 stayed on the code screen after the code was submitted.',
+      hint: process.env.TOTP_SECRET
+        ? 'Check the 2FA secret in Settings, and that this Mac’s clock is set automatically — a drifting clock invalidates every code.'
+        : 'The code was already expired or mistyped. Run again and enter a fresh code.',
+    });
   }
   console.log('Logged in.');
 }
@@ -279,6 +481,7 @@ async function login(page) {
 // 4. NAVIGATE TO EXPENSE MODULE
 // ---------------------------------------------------------------------------
 async function openExpenseModule(page) {
+  setStep('expense_module', 'opening the Expense module');
   await page.getByRole('button', { name: 'Expense' }).click();
   const outer = page.locator('iframe[title="ibistic"]').contentFrame();
   await outer.locator('#ecm_link').waitFor({ timeout: 15000 });
@@ -296,7 +499,14 @@ async function openExpenseModule(page) {
     }
   }
 
-  await inner.locator('#inner-draft-container').waitFor({ timeout: 10000 });
+  try {
+    await inner.locator('#inner-draft-container').waitFor({ timeout: 10000 });
+  } catch {
+    throw failure('The Expense module in indfak2 never loaded.', {
+      detail: 'The draft list (#inner-draft-container) stayed empty after three attempts.',
+      hint: 'Usually indfak2 being slow — run again. If it keeps happening, open indfak2 in a browser and check the account still has access to Expense.',
+    });
+  }
   return { outer, inner };
 }
 
@@ -458,6 +668,7 @@ async function closeAllocationDialogIfOpen(inner) {
 //    Returns row info if found & selected, null if not found.
 // ---------------------------------------------------------------------------
 async function findMatchingTransaction(page, outer, inner, invoice, draftName = null) {
+  setStep('transactions', `searching the card transactions for ${invoice.vendor || 'this document'}`);
   // If the transaction-selection page is already open from a previous no-match,
   // reuse it — searching the same grid avoids navigation issues entirely.
   // (Detected via the " Allocate" button, NOT `.stretch` — see allocationPageOpen.)
@@ -630,6 +841,7 @@ async function findMatchingTransaction(page, outer, inner, invoice, draftName = 
 // allocated row each time, so the target row is re-found by its full text.
 // ---------------------------------------------------------------------------
 async function allocateOneTransaction(page, inner, rowText, uploadPath, opts = {}) {
+  setStep('line', 'creating the expense line from the card transaction');
   // opts.openSelectionPage: the caller tracks page state — the first allocation
   // reuses the selection page left open by findMatchingTransaction; subsequent
   // ones start from the line-items tab after the previous line's save.
@@ -744,6 +956,17 @@ async function selectByPartialLabel(locator, partialLabel) {
     };
     check();
   }), partialLabel);
+}
+
+// Alias codes indfak2 actually offered for the search term — the useful half of
+// a "no such alias" report.
+async function aliasSearchResults(inner) {
+  try {
+    const texts = await inner.getByRole('link').allInnerTexts();
+    return [...new Set(texts.map(t => t.replace(/\s+/g, ' ').trim()).filter(t => /^\d{6,}/.test(t)))].slice(0, 8);
+  } catch {
+    return [];
+  }
 }
 
 async function readFormFields(inner) {
@@ -873,12 +1096,14 @@ async function fillNewDraft(page, inner, invoice, opts = {}) {
   const expenseName = opts.draftName || `* ${invoice.vendor} - ${invoice.date.slice(0, 7)}`;
   const travel      = opts.travel    || null;
 
+  setStep('draft', `creating the draft "${expenseName}"`);
   await inner.getByRole('textbox', { name: 'Name *' }).fill(expenseName);
   // Trips use Type 2 ("Travel settlements (days,expenses,transp.)"), which
   // unlocks the Travel details section; everything else uses EXPENSE_TYPE.
   await selectByPartialLabel(inner.getByLabel('Type'), travel ? 'Travel settlements' : EXPENSE_TYPE);
   await new Promise(r => setTimeout(r, 1000)); // form re-renders on type change
 
+  setStep('alias', `selecting the project alias ${alias}`);
   const aliasField = inner.getByRole('textbox', { name: 'Alias *' });
   await aliasField.click();
 
@@ -906,9 +1131,24 @@ async function fillNewDraft(page, inner, invoice, opts = {}) {
     }
   }
 
-  await aliasOption.waitFor({ timeout: 10000 });
+  // A wrong alias code fails here, and as a bare locator timeout it is
+  // unreadable — so say which alias was searched for and what indfak2 offered
+  // instead. This is the single most common configuration mistake.
+  try {
+    await aliasOption.waitFor({ timeout: 10000 });
+  } catch {
+    const offered = await aliasSearchResults(inner);
+    const wanted = opts.alias ? `Alias "${alias}"` : `Alias "${PROJECT_ALIAS_OPTION}"`;
+    throw failure(`${wanted} does not exist in indfak2, or this account cannot use it.`, {
+      detail: offered.length
+        ? `Searching for "${alias}" returned: ${offered.join(' · ')}`
+        : `Searching for "${alias}" returned no projects.`,
+      hint: 'Fix the alias on the settlement, or set the right default alias in Settings.',
+    });
+  }
   await aliasOption.click();
   await new Promise(r => setTimeout(r, 800));
+  setStep('draft', 'filling in the draft form');
 
   // Travel details (Type 2 only): Travel Dates + Departure/Destination places.
   // Line-item dates must fall inside the travel window, so this matters beyond
@@ -1068,6 +1308,7 @@ async function allocateAndUpload(page, inner, invoicePath, opts = {}) {
 // manually, uploads the receipt, saves.
 // ---------------------------------------------------------------------------
 async function createNormalCostLine(page, inner, invoice, uploadPath, opts = {}) {
+  setStep('line', 'creating the normal-cost expense line');
   await closeAllocationDialogIfOpen(inner);
   const mainFab = await ensureLineItemsTab(inner, opts.draftName);
   await openFabChild(inner, mainFab, 'normal');
@@ -1231,6 +1472,33 @@ async function runSingle(page, invoicePath) {
       ? 'Allocation had errors — review the draft manually.'
       : 'Transaction allocated and invoice attached. Please review and submit manually.';
     console.log(`\n✓ Done. Draft "${draftName}" ready for review.`);
+
+    // Same rule as folder mode: only a clean run may be sent on. A draft picked
+    // rather than created may hold other people's lines, so it is never sent.
+    if (SUBMIT_SETTLEMENT) {
+      const submitState = { requested: true, submitted: false, skipped_reason: null, button: null, errors: [] };
+      if (allocErrors.length || saveErrors.length) {
+        submitState.skipped_reason = 'the draft has errors';
+        console.log(`  Not submitting — ${submitState.skipped_reason}.`);
+      } else if (action !== 'new') {
+        submitState.skipped_reason = 'the invoice went into an existing draft, which may still be incomplete';
+        console.log(`  Not submitting — ${submitState.skipped_reason}.`);
+      } else {
+        const res = await submitSettlement(page, outer, inner, draftName).catch(err => ({
+          submitted: false, errors: [err.message.split('\n')[0]],
+        }));
+        submitState.submitted = res.submitted;
+        submitState.button    = res.button || null;
+        submitState.errors    = res.errors;
+        if (!res.submitted) console.log(`  ⚠ Not submitted: ${res.errors.join(' | ')}`);
+      }
+      rejsudEmit('submit', submitState);
+      manifest.submit = submitState;
+      if (submitState.submitted) {
+        manifest.status = 'submitted';
+        manifest.note = 'Transaction allocated, invoice attached, settlement sent for approval.';
+      }
+    }
   }
 
   const manifestPath = path.join(CLAIMS_OUTPUT, `${invoice.date}_${invoice.vendor.replace(/[^a-z0-9]/gi, '_')}_${Date.now()}.json`);
@@ -1261,16 +1529,171 @@ async function readSettlementNumber(inner) {
 }
 
 // ---------------------------------------------------------------------------
+// SUBMIT THE SETTLEMENT (opt-in)
+// Sending a settlement puts it in the approver's queue, which the bot cannot
+// undo — so it only runs when the caller asked for it AND every document in the
+// folder actually made it into the draft (see the gate in runFolderInner).
+// ---------------------------------------------------------------------------
+
+// Every visible button label, for the "couldn't find it" error — a failed run
+// then says exactly what this tenant calls its buttons.
+async function visibleButtonLabels(inner) {
+  const labels = await inner.locator('button, a.btn, input[type="submit"]')
+    .evaluateAll(els => els
+      .filter(e => e.offsetParent !== null || e.getClientRects().length)
+      .map(e => (e.textContent || e.value || '').replace(/\s+/g, ' ').trim())
+      .filter(Boolean))
+    .catch(() => []);
+  return [...new Set(labels)];
+}
+
+// Picks the button that sends the settlement on. Labels differ per tenant and
+// language ("Send", "Submit", "Send til godkendelse"), and they carry an icon
+// glyph, so match on scored text rather than one exact name.
+async function findSubmitControl(inner, { wizard = false } = {}) {
+  const candidates = inner.locator('button, a.btn');
+  const count = await candidates.count().catch(() => 0);
+  const scored = [];
+  for (let i = 0; i < count; i++) {
+    const el = candidates.nth(i);
+    if (!(await el.isVisible().catch(() => false))) continue;
+    const text  = ((await el.textContent().catch(() => '')) || '').replace(/\s+/g, ' ').trim();
+    const title = (await el.getAttribute('title').catch(() => '')) || '';
+    const label = text || title.trim();
+    if (!label) continue;
+    // Never mistake the destructive or the everyday buttons for the send one.
+    if (/^\s*(cancel|annuller|delete|slet|save|gem|back|tilbage|close|luk|allocate)\s*$/i.test(label)) continue;
+    let score = 0;
+    if (/^(send|submit)$/i.test(label)) score = 4;
+    else if (/(send|submit)[^a-z]{0,3}(for |to |til )?(approval|godkend)/i.test(label)) score = 4;
+    else if (/^(send|submit|forward|videresend|afsend)\b/i.test(label)) score = 3;
+    else if (/(send|submit|godkend)/i.test(label)) score = 1;
+    // Later wizard steps are labelled as steps, not as the action.
+    else if (wizard && /^(next|continue|finish|complete|done|videre|fortsæt|afslut)\b/i.test(label)) score = 2;
+    if (score) scored.push({ el, label, score });
+  }
+  scored.sort((a, b) => b.score - a.score);
+  return scored[0] || null;
+}
+
+async function submitSettlement(page, outer, inner, draftName) {
+  setStep('submit', 'sending the settlement for approval');
+  rejsudEmit('phase', { phase: 'submitting' });
+  console.log(`\nSubmitting "${draftName}" for approval...`);
+
+  // A cost form left open would swallow the click, and a toast would intercept it.
+  await closeAllocationDialogIfOpen(inner).catch(() => {});
+  await inner.locator('#toast-container').waitFor({ state: 'hidden', timeout: 5000 }).catch(() => {});
+
+  let control = await findSubmitControl(inner);
+  if (!control && draftName) {
+    // The send button may live on the draft's own view rather than whichever
+    // sub-page the last expense left us on — walk back via the breadcrumb.
+    const crumb = inner.locator('a').filter({ hasText: draftName }).first();
+    if (await crumb.isVisible().catch(() => false)) {
+      await crumb.click().catch(() => {});
+      await new Promise(r => setTimeout(r, 1500));
+      control = await findSubmitControl(inner);
+    }
+  }
+  if (!control) {
+    const seen = await visibleButtonLabels(inner);
+    return { submitted: false, errors: [`Submit button not found on the draft — visible buttons: ${seen.join(' | ') || '(none)'}`] };
+  }
+
+  // Sending is a wizard, not a button: this tenant's first step reads
+  // "Send (1 of 2)". Walk it — click, look at what came back, click again —
+  // and stop as soon as a click changes nothing, so a page that keeps offering
+  // the same button can never loop.
+  const pressed = [];
+  const fingerprint = async () => (await visibleButtonLabels(inner)).join(' | ');
+
+  for (let step = 0; step < 4 && control; step++) {
+    const before = await fingerprint();
+    console.log(`  Clicking "${control.label}".`);
+    pressed.push(control.label);
+    try {
+      await control.el.click({ timeout: 10000 });
+    } catch {
+      await control.el.click({ force: true, timeout: 5000 }).catch(() => {});
+    }
+    await new Promise(r => setTimeout(r, 3000));
+    await inner.locator('#toast-container').waitFor({ state: 'hidden', timeout: 8000 }).catch(() => {});
+
+    // A confirmation dialog may follow any step. Only answer a real modal — a
+    // global search would find the send button again and press it twice.
+    const modal = inner.locator('.modal, [role="dialog"], .sweet-alert').filter({ has: inner.locator('button') }).first();
+    if (await modal.isVisible().catch(() => false)) {
+      const confirm = modal.getByRole('button', { name: /^\s*(yes|ja|ok|send|submit|confirm|bekræft|continue|fortsæt)\s*$/i }).first();
+      if (await confirm.isVisible().catch(() => false)) {
+        const label = ((await confirm.textContent().catch(() => '')) || '').trim();
+        console.log(`  Confirming: "${label}".`);
+        pressed.push(label);
+        await confirm.click().catch(() => {});
+        await new Promise(r => setTimeout(r, 3000));
+      }
+    }
+
+    // Validation refusals surface the same two ways line saves do.
+    const errors = await checkErrors(inner);
+    const banner = inner.getByText(/Errors count: \d+/).first();
+    if (await banner.isVisible().catch(() => false)) {
+      errors.push(((await banner.textContent().catch(() => '')) || '').trim());
+    }
+    if (errors.length) {
+      return { submitted: false, button: pressed.join(' → '), errors: [`Submit refused after "${pressed.join(' → ')}": ${errors.join(' | ')}`] };
+    }
+
+    // Back on the drafts list means the wizard is done.
+    if (await inner.locator('#inner-draft-container').isVisible().catch(() => false)) break;
+    // Nothing on the page moved: the click did not take, and clicking the same
+    // thing again would not help either.
+    if ((await fingerprint()) === before) break;
+
+    control = await findSubmitControl(inner, { wizard: true });
+  }
+
+  // Proof, not optimism: a sent settlement is gone from the drafts list. Go back
+  // to the module's front page through the outer frame's own nav link — clicking
+  // the top-level "Expense" button again matches several elements once the send
+  // wizard has run.
+  let listed = null;
+  try {
+    if (!(await inner.locator('#inner-draft-container').isVisible().catch(() => false))) {
+      await outer.locator('#ecm_link').click({ timeout: 10000 });
+      await inner.locator('#inner-draft-container').waitFor({ timeout: 20000 });
+    }
+    await new Promise(r => setTimeout(r, 2500));
+    const names = (await inner.locator('#inner-draft-container .ui-grid-row h4').allTextContents().catch(() => []))
+      .map(t => t.trim()).filter(Boolean);
+    listed = names.some(n => n === draftName || n.includes(draftName));
+  } catch (err) {
+    return {
+      submitted: false, button: pressed.join(' → '),
+      errors: [`Pressed ${pressed.map(p => `"${p}"`).join(' → ')} but could not verify the result: ${err.message.split('\n')[0]}`],
+    };
+  }
+  if (listed) {
+    return {
+      submitted: false, button: pressed.join(' → '),
+      errors: [`Pressed ${pressed.map(p => `"${p}"`).join(' → ')} but the settlement is still in the drafts list.`],
+    };
+  }
+  console.log('  ✓ Submitted — the settlement has left the drafts list.');
+  return { submitted: true, errors: [], button: pressed.join(' → ') };
+}
+
+// ---------------------------------------------------------------------------
 // FOLDER RUN
-// Parses alias + settlement name from folder name, creates one draft for all
-// documents in the folder. A Claude planning step decides per document whether
-// it is a card expense (matched to a card transaction), an out-of-pocket
-// expense (entered as a "Normal cost" line), or a supporting document
-// (attached to the first successful expense line).
+// Reads the settlement's name and alias (see readSettlementMeta) and creates
+// one draft for all documents in the folder. A Claude planning step decides per
+// document whether it is a card expense (matched to a card transaction), an
+// out-of-pocket expense (entered as a "Normal cost" line), or a supporting
+// document (attached to the first successful expense line).
 // ---------------------------------------------------------------------------
 async function runFolder(page, folderPath) {
   const folderName = path.basename(folderPath);
-  const { alias, settlementName } = parseFolderName(folderName);
+  const { alias, settlementName } = readSettlementMeta(folderPath);
 
   const files = fs.readdirSync(folderPath)
     .filter(f => /\.(pdf|png|jpe?g|heic)$/i.test(f))
@@ -1297,6 +1720,7 @@ async function runFolderInner(page, folderPath, folderName, alias, settlementNam
   rejsudEmit('phase', { phase: 'parsing', total: files.length });
   for (const f of files) {
     rejsudEmit('progress', { phase: 'parsing', index: docs.length + 1, total: files.length, file: path.basename(f) });
+    setStep('parsing', `reading ${path.basename(f)}`);
     console.log(`  Parsing ${path.basename(f)}...`);
     const prep = await prepareFile(f, tmpDir);
     const inv  = await parseInvoice(prep.parsePath);
@@ -1306,6 +1730,7 @@ async function runFolderInner(page, folderPath, folderName, alias, settlementNam
 
   // Plan the settlement: card expense / out-of-pocket expense / supporting doc
   rejsudEmit('phase', { phase: 'planning' });
+  setStep('planning', 'working out what each document is');
   const { travel } = await planSettlement(docs, settlementName);
   console.log('\nSettlement plan:');
   if (travel) console.log(`  Travel: ${travel.origin_city} (${travel.origin_country}) → ${travel.destination_city} (${travel.destination_country}), ${travel.start} → ${travel.end}`);
@@ -1450,12 +1875,18 @@ async function runFolderInner(page, folderPath, folderName, alias, settlementNam
         });
       }
     } catch (err) {
-      console.error(`  ✗ Failed on ${docInfo.file}: ${err.message.split('\n')[0]}`);
-      await page.screenshot({ path: `/tmp/rejsud-fail-${docInfo.file.replace(/[^a-z0-9]/gi, '_')}.png`, fullPage: true }).catch(() => {});
+      // One expense failing is not fatal, but its error still has to be
+      // readable in the manifest and in the app's result table.
+      const info = describeFailure(err);
+      console.error(`  ✗ Failed on ${docInfo.file}: ${info.title}`);
+      if (info.hint) console.error(`    → ${info.hint}`);
+      const shot = path.join(os.tmpdir(), `rejsud-fail-${docInfo.file.replace(/[^a-z0-9]/gi, '_')}.png`);
+      const shotOk = await page.screenshot({ path: shot, fullPage: true }).then(() => true).catch(() => false);
       if (extras.length) { pendingSupport = extras; supportAttachedTo = null; }
       results.push({
         ...docInfo, expense_type: null, matched: false, transaction_row: null,
-        fields_entered: null, errors: [err.message.split('\n')[0]], moved_to_output: false,
+        fields_entered: null, errors: [info.title], moved_to_output: false,
+        error_detail: { while: info.while, detail: info.detail, hint: info.hint, screenshot: shotOk ? shot : null, raw: info.raw.split('\n')[0] },
       });
       await closeAllocationDialogIfOpen(inner).catch(() => {});
     }
@@ -1465,7 +1896,34 @@ async function runFolderInner(page, folderPath, folderName, alias, settlementNam
   const unmatchedCount = results.filter(r => !r.moved_to_output).length;
   console.log(`\n✓ Draft "${draftName}" complete: ${allocatedCount} line(s) created, ${unmatchedCount} unprocessed.`);
   if (pendingSupport.length) console.log(`  ⚠ Supporting document(s) NOT attached (no expense line succeeded): ${pendingSupport.map(s => s.file).join(', ')}`);
-  console.log('  Status: DRAFT (not submitted — please review and submit manually)');
+
+  // Submit, if this run asked for it. A settlement that is missing documents is
+  // worse to send than to leave as a draft, so anything unfiled blocks it — the
+  // user fixes the folder and re-runs rather than chasing a half-sent claim
+  // through the approval queue.
+  const submitState = { requested: SUBMIT_SETTLEMENT, submitted: false, skipped_reason: null, button: null, errors: [] };
+  if (SUBMIT_SETTLEMENT) {
+    const blockers = [];
+    if (allocatedCount === 0) blockers.push('no expense line was created');
+    if (unmatchedCount > 0) blockers.push(`${unmatchedCount} document(s) not filed`);
+    if (pendingSupport.length) blockers.push(`${pendingSupport.length} supporting document(s) not attached`);
+    if (blockers.length) {
+      submitState.skipped_reason = blockers.join('; ');
+      console.log(`  Not submitting — ${submitState.skipped_reason}. Left as a draft to fix and re-run.`);
+    } else {
+      const res = await submitSettlement(page, outer, inner, draftName).catch(err => ({
+        submitted: false, errors: [err.message.split('\n')[0]],
+      }));
+      submitState.submitted = res.submitted;
+      submitState.button    = res.button || null;
+      submitState.errors    = res.errors;
+      if (!res.submitted) console.log(`  ⚠ Not submitted: ${res.errors.join(' | ')}`);
+    }
+  }
+  rejsudEmit('submit', submitState);
+  console.log(submitState.submitted
+    ? '  Status: SUBMITTED (sent for approval)'
+    : '  Status: DRAFT (not submitted — please review and submit manually)');
 
   // Build output folder name: YYYYMMDD-HHMMSS[-settlementNumber]
   const now = new Date();
@@ -1498,7 +1956,12 @@ async function runFolderInner(page, folderPath, folderName, alias, settlementNam
       expenses_card: results.filter(r => r.expense_type === 'From Card Transaction' && r.moved_to_output).length,
       expenses_normal_cost: results.filter(r => r.expense_type === 'Normal Cost' && r.moved_to_output).length,
       expenses_unprocessed: unmatchedCount,
-      status: 'DRAFT — not submitted, review and submit manually',
+      submit: submitState,
+      status: submitState.submitted
+        ? 'SUBMITTED — sent for approval'
+        : SUBMIT_SETTLEMENT
+          ? `DRAFT — submit was requested but did not happen (${submitState.skipped_reason || submitState.errors.join(' | ')})`
+          : 'DRAFT — not submitted, review and submit manually',
     },
     invoices: results,
     supporting_documents: supportingResults,
@@ -1540,12 +2003,16 @@ async function runFolderInner(page, folderPath, folderName, alias, settlementNam
 // MAIN
 // ---------------------------------------------------------------------------
 async function run() {
-  const arg = process.argv[2];
+  // Flags may appear anywhere; the first non-flag argument is the target.
+  const arg = process.argv.slice(2).find(a => !a.startsWith('--'));
   if (!arg) {
-    console.error('Usage: node bot.js <invoice-file>');
-    console.error('       node bot.js <folder>          e.g. 1240351001-ai_subscription_fees');
+    console.error('Usage: node bot.js <invoice-file> [--submit|--no-submit]');
+    console.error('       node bot.js <folder>          e.g. ai_subscription_fees');
+    console.error('  --submit     send the settlement for approval when everything filed cleanly');
+    console.error('  --no-submit  leave it as a draft even if REJSUD_SUBMIT=1 (the default)');
     process.exit(1);
   }
+  if (SUBMIT_SETTLEMENT) console.log('Submit mode: the settlement will be sent for approval if everything files cleanly.');
 
   const targetPath = path.isAbsolute(arg) ? arg : path.join(RECEIPTS_INBOX, arg);
   const isFolder   = fs.existsSync(targetPath) && fs.statSync(targetPath).isDirectory();
@@ -1554,8 +2021,11 @@ async function run() {
   // so CLI behaviour is unchanged; the desktop app's Settings toggle sets it to 1.
   const browser = await chromium.launch({ headless: process.env.REJSUD_HEADLESS === '1', slowMo: 700 });
   const page    = await browser.newPage();
+  // GUI only: stream the page to the desktop app's Browser pane.
+  const stopScreencast = await rejsudStartScreencast(page);
 
   try {
+    setStep('login', 'signing in to indfak2');
     await login(page);
     if (isFolder) {
       await runFolder(page, targetPath);
@@ -1563,16 +2033,28 @@ async function run() {
       console.log(`\nParsing invoice: ${targetPath}`);
       await runSingle(page, targetPath);
     }
+  } catch (err) {
+    // Reported here rather than at the top level: the browser is still open,
+    // so the screenshot shows the page as it was when the run gave up.
+    await reportFailure(page, err);
+    throw err;
   } finally {
+    if (stopScreencast) await stopScreencast();
     await browser.close();
   }
 }
 
 if (require.main === module) {
-  run().catch(err => {
-    console.error('Bot failed:', err.message);
+  run().catch(async err => {
+    // Anything that failed before the browser was up (a missing folder, a bad
+    // API key) is explained here; run() already reported the rest.
+    await reportFailure(null, err);
+    // Kept for compatibility: the desktop app falls back to this line when a
+    // failure arrives without a structured event.
+    console.error('Bot failed:', err.message.split('\n')[0]);
     process.exit(1);
   });
 }
 
-module.exports = { parseFolderName, prepareFile, parseInvoice, planSettlement, login, openExpenseModule };
+module.exports = { readSettlementMeta, prepareFile, parseInvoice, planSettlement, login, openExpenseModule,
+                   setStep, failure, describeFailure };

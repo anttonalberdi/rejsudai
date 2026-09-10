@@ -16,13 +16,18 @@ const items = new Map();
 let running = false;
 
 /* ---------------------------------------------------------------- views -- */
+// "new" is a page under the Settlements tab rather than a tab of its own, so
+// that tab stays lit while the settlement is being composed.
+const VIEWS = ['run', 'new', 'aliases', 'settings'];
+function showView(name) {
+  for (const view of VIEWS) $(`#view-${view}`).hidden = name !== view;
+  const lit = name === 'new' ? 'run' : name;
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('is-active', t.dataset.view === lit));
+  if (name === 'settings') refreshBrowserStatus();
+}
+
 document.querySelectorAll('.tab').forEach(tab => {
-  tab.addEventListener('click', () => {
-    document.querySelectorAll('.tab').forEach(t => t.classList.toggle('is-active', t === tab));
-    $('#view-run').hidden = tab.dataset.view !== 'run';
-    $('#view-settings').hidden = tab.dataset.view !== 'settings';
-    if (tab.dataset.view === 'settings') refreshBrowserStatus();
-  });
+  tab.addEventListener('click', () => showView(tab.dataset.view));
 });
 
 /* ------------------------------------------------------------------ log -- */
@@ -37,9 +42,196 @@ function appendLog(text, stream) {
 }
 $('#btn-clear-log').addEventListener('click', () => (logEl.textContent = ''));
 
+/* -------------------------------------------------------- live browser -- */
+// Base64 JPEG frames pushed from the automation's own Chromium (see
+// app/lib/screencast.js) — a mirror, not a browser: clicks here go nowhere.
+// The last frame stays up after a run, so a failure is still on screen.
+const frameEl = $('#browser-frame');
+const liveBadge = $('#browser-live');
+
+window.rejsud.onFrame(({ data }) => {
+  if (!data) return;
+  frameEl.src = `data:image/jpeg;base64,${data}`;
+  frameEl.hidden = false;
+  $('#browser-idle').hidden = true;
+  liveBadge.hidden = false;
+});
+window.rejsud.onFrameEnd(() => (liveBadge.hidden = true));
+
+/* ------------------------------------------------------------- appearance -- */
+// "auto" leaves the CSS pairs on `color-scheme: light dark` and lets macOS
+// decide; the other two stamp data-theme, which pins the scheme. Main gets the
+// same value on save and points nativeTheme at it, so the traffic lights and
+// the native dialogs turn with the window.
+const THEMES = ['auto', 'light', 'dark'];
+
+function applyTheme(theme) {
+  const chosen = THEMES.includes(theme) ? theme : 'auto';
+  if (chosen === 'auto') delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = chosen;
+  for (const radio of document.querySelectorAll('input[name="theme"]')) {
+    radio.checked = radio.value === chosen;
+  }
+  return chosen;
+}
+
+// A theme picker that waited for a Save button would be a strange thing to use,
+// so this one paints and persists on the spot.
+document.querySelectorAll('input[name="theme"]').forEach(radio => {
+  radio.addEventListener('change', () => {
+    if (!radio.checked) return;
+    const chosen = applyTheme(radio.value);
+    window.rejsud.settings.save({ theme: chosen }).catch(err => flash('#settings-msg', clean(err), 'err'));
+  });
+});
+
+/* --------------------------------------------------------- panel sizes -- */
+// Two splitters: the settlement list's width, and the browser pane's share of
+// the right column. Both are percentages of the run view, kept in settings so
+// the window opens the way it was left.
+const LAYOUT_DEFAULT = { listPct: 52, browserPct: 50 };
+const layout = { ...LAYOUT_DEFAULT };
+const runView = $('#view-run');
+// Matches the clamp in settings.js — a splitter can never hide a panel.
+const clampPct = n => Math.min(85, Math.max(15, Math.round(n * 10) / 10));
+
+function applyLayout() {
+  runView.style.setProperty('--list-w', `${layout.listPct}%`);
+  runView.style.setProperty('--browser-h', `${layout.browserPct}%`);
+}
+
+function adoptLayout(saved) {
+  layout.listPct = clampPct(Number(saved && saved.listPct) || LAYOUT_DEFAULT.listPct);
+  layout.browserPct = clampPct(Number(saved && saved.browserPct) || LAYOUT_DEFAULT.browserPct);
+  applyLayout();
+}
+
+// Dragging moves the splitter on every pointer event; one write once the hand
+// comes to rest is plenty.
+let layoutSaveTimer = null;
+function setLayout(key, pct) {
+  const next = clampPct(pct);
+  if (next === layout[key]) return;
+  layout[key] = next;
+  applyLayout();
+  clearTimeout(layoutSaveTimer);
+  layoutSaveTimer = setTimeout(() => window.rejsud.settings.save({ layout: { ...layout } }).catch(() => {}), 400);
+}
+
+// Drag it, arrow-key it, or double-click to put it back where it started.
+function wireResizer(handle, { axis, box, key }) {
+  const pctFrom = event => {
+    const rect = box().getBoundingClientRect();
+    return axis === 'x'
+      ? ((event.clientX - rect.left) / rect.width) * 100
+      : ((event.clientY - rect.top) / rect.height) * 100;
+  };
+  const stop = event => {
+    if (!handle.classList.contains('is-dragging')) return;
+    handle.classList.remove('is-dragging');
+    document.body.classList.remove('is-resizing', `is-resizing-${axis}`);
+    try {
+      handle.releasePointerCapture(event.pointerId);
+    } catch {
+      // Capture already released with the pointer (cancel, window blur).
+    }
+  };
+
+  handle.addEventListener('pointerdown', event => {
+    if (event.button !== 0) return;
+    // Capture keeps the drag on the handle even as the pointer crosses the
+    // panes — including the browser frame, which would otherwise swallow it.
+    event.preventDefault();
+    handle.setPointerCapture(event.pointerId);
+    handle.classList.add('is-dragging');
+    document.body.classList.add('is-resizing', `is-resizing-${axis}`);
+  });
+  handle.addEventListener('pointermove', event => {
+    if (handle.hasPointerCapture(event.pointerId)) setLayout(key, pctFrom(event));
+  });
+  handle.addEventListener('pointerup', stop);
+  handle.addEventListener('pointercancel', stop);
+  handle.addEventListener('dblclick', () => setLayout(key, LAYOUT_DEFAULT[key]));
+  handle.addEventListener('keydown', event => {
+    const step = { ArrowLeft: -2, ArrowUp: -2, ArrowRight: 2, ArrowDown: 2 }[event.key];
+    if (step === undefined) return;
+    event.preventDefault();
+    setLayout(key, layout[key] + step);
+  });
+}
+
+wireResizer($('#resize-list'), { axis: 'x', box: () => runView, key: 'listPct' });
+wireResizer($('#resize-browser'), { axis: 'y', box: () => $('.panel-right'), key: 'browserPct' });
+
+$('#btn-browser-expand').addEventListener('click', event => {
+  const expanded = $('#view-run').classList.toggle('is-browser-expanded');
+  event.currentTarget.textContent = expanded ? 'Collapse' : 'Expand';
+  event.currentTarget.setAttribute('aria-pressed', String(expanded));
+});
+
+/* --------------------------------------------------------- alias library -- */
+// The projects costs are booked on: a short name of the user's own plus the
+// alias code indfak2 knows it by. Kept in settings; mirrored here so the
+// settlement list and the New settlement page can render it without an IPC
+// round-trip per keystroke. defaultCode is the entry a new settlement starts on.
+const aliasLib = { list: [], defaultCode: '' };
+// Sentinel for the dropdown's "New alias…" row. No real code can collide with
+// it: codes are letters, digits, dots, dashes and underscores.
+const NEW_ALIAS = '\u0000new';
+
+function adoptAliases(settings) {
+  const list = Array.isArray(settings.aliases) ? settings.aliases : [];
+  const defaultCode = settings.expenseAlias || '';
+  const moved = defaultCode !== aliasLib.defaultCode || JSON.stringify(list) !== JSON.stringify(aliasLib.list);
+  aliasLib.list = list;
+  aliasLib.defaultCode = defaultCode;
+  // Re-rendering the Settings editor discards half-typed rows, so only do it
+  // when the stored library really moved — not on every read of it.
+  if (moved) renderAliasRows();
+}
+
+// A settlement records only the code, so the name comes from the library.
+function aliasLabel(code) {
+  const hit = aliasLib.list.find(a => a.code === code);
+  return hit && hit.name !== code ? `${hit.name} (${code})` : code;
+}
+
 /* ------------------------------------------------------------ list view -- */
 function statusLabel(s) {
-  return { queued: 'Queued', running: 'Running', done: 'Done', error: 'Failed', cancelled: 'Cancelled' }[s] || 'Ready';
+  return { queued: 'Queued', running: 'Running', done: 'Done', submitted: 'Submitted',
+           error: 'Failed', cancelled: 'Cancelled' }[s] || 'Ready';
+}
+
+// What went wrong, in the order a person needs it: the cause, the step it
+// happened in, the evidence, and the fix. bot.js supplies all four; a run that
+// died before it could explain itself falls back to its last error line.
+function failureBlock(item) {
+  const f = item.failure || {};
+  const box = el('div', 'failure');
+  box.appendChild(el('div', 'failure-title', f.title || item.error));
+  if (f.while) box.appendChild(el('div', 'failure-step', `While ${f.while}.`));
+  if (f.detail && f.detail !== f.title) box.appendChild(el('div', 'failure-detail', f.detail));
+  if (f.hint) box.appendChild(el('div', 'failure-hint', f.hint));
+
+  const acts = el('div', 'failure-actions');
+  if (f.screenshot) {
+    const b = el('button', 'btn btn-quiet', 'Screenshot');
+    b.title = 'The page as it looked when the run stopped';
+    b.addEventListener('click', () => window.rejsud.shell.openPath(f.screenshot));
+    acts.appendChild(b);
+  }
+  if (f.raw && f.raw !== f.title) {
+    const b = el('button', 'btn btn-quiet', 'Technical details');
+    b.addEventListener('click', () => {
+      const open = box.classList.toggle('is-open');
+      b.textContent = open ? 'Hide details' : 'Technical details';
+    });
+    acts.appendChild(b);
+    const raw = el('pre', 'failure-raw', f.raw);
+    box.appendChild(raw);
+  }
+  if (acts.childNodes.length) box.appendChild(acts);
+  return box;
 }
 
 function render() {
@@ -65,32 +257,42 @@ function render() {
     const main = el('div', 'settlement-main');
     main.appendChild(el('div', 'settlement-name', item.settlementName || item.folder));
     const bits = [];
-    if (item.alias) bits.push(`alias ${item.alias}`);
+    if (item.alias) bits.push(`alias ${aliasLabel(item.alias)}`);
     bits.push(`${item.fileCount} file${item.fileCount === 1 ? '' : 's'}`);
     bits.push(item.folder);
     main.appendChild(el('div', 'settlement-meta', bits.join(' · ')));
 
-    if (item.error) main.appendChild(el('div', 'settlement-error', item.error));
+    if (item.error) main.appendChild(failureBlock(item));
 
-    if (item.manifest || item.outputFolder) {
-      const actions = el('div', 'settlement-actions');
-      if (item.manifest) {
-        const b = el('button', 'btn btn-quiet', 'Details');
-        b.addEventListener('click', () => showResult(item));
-        actions.appendChild(b);
-      }
-      if (item.outputFolder) {
-        const b = el('button', 'btn btn-quiet', 'Open output folder');
-        b.addEventListener('click', () => window.rejsud.shell.openPath(item.outputFolder));
-        actions.appendChild(b);
-      }
-      if (item.manifestPath) {
-        const b = el('button', 'btn btn-quiet', 'manifest.json');
-        b.addEventListener('click', () => window.rejsud.shell.openPath(item.manifestPath));
-        actions.appendChild(b);
-      }
-      main.appendChild(actions);
+    const actions = el('div', 'settlement-actions');
+    if (item.manifest) {
+      const b = el('button', 'btn btn-quiet', 'Details');
+      b.addEventListener('click', () => showResult(item));
+      actions.appendChild(b);
     }
+    if (item.outputFolder) {
+      const b = el('button', 'btn btn-quiet', 'Open output folder');
+      b.addEventListener('click', () => window.rejsud.shell.openPath(item.outputFolder));
+      actions.appendChild(b);
+    }
+    if (item.manifestPath) {
+      const b = el('button', 'btn btn-quiet', 'manifest.json');
+      b.addEventListener('click', () => window.rejsud.shell.openPath(item.manifestPath));
+      actions.appendChild(b);
+    }
+    // A settlement saved but not yet filed is only its inbox folder, so removing
+    // it deletes that folder. One whose folder the automation already consumed
+    // is just a row left for its result — that only leaves the list.
+    const onDisk = item.onDisk !== false;
+    const rm = el('button', 'btn btn-quiet btn-danger',
+      item.removing ? 'Removing…' : onDisk ? 'Remove' : 'Remove from list');
+    rm.title = onDisk
+      ? 'Delete this settlement and the receipts copied into its inbox folder'
+      : 'Take this finished settlement off the list';
+    rm.disabled = running || !!item.removing;
+    rm.addEventListener('click', () => removeSettlement(item));
+    actions.appendChild(rm);
+    main.appendChild(actions);
     li.appendChild(main);
 
     const status = el('span', 'status', statusLabel(item.status));
@@ -115,8 +317,10 @@ function syncSelection() {
       : 'Nothing to process';
   $('#select-all').checked = all.length > 0 && sel.length === all.length;
   $('#select-all').disabled = running || all.length === 0;
+  $('#opt-submit').disabled = running;
+  $('#opt-submit-new').disabled = running;
   $('#btn-process').disabled = running || sel.length === 0;
-  $('#btn-process').textContent = sel.length > 1 ? `Process ${sel.length} settlements` : 'Process';
+  $('#btn-process').textContent = sel.length > 1 ? `Process ${sel.length} settlements` : 'Process settlements';
 }
 
 $('#select-all').addEventListener('change', e => {
@@ -126,7 +330,6 @@ $('#select-all').addEventListener('change', e => {
 
 async function scanInbox() {
   const res = await window.rejsud.inbox.scan();
-  $('#inbox-path').textContent = res.inbox;
   $('#inbox-error').hidden = res.exists;
   if (!res.exists) {
     $('#inbox-error').textContent = `Inbox folder not found: ${res.inbox} — set it in Settings.`;
@@ -138,42 +341,88 @@ async function scanInbox() {
     // A folder that is still on disk after a failed run keeps its result, but
     // its file count is refreshed — processed files have already been moved out.
     items.set(s.id, before && (before.status === 'done' || before.status === 'error')
-      ? { ...before, ...s, manual: before.manual, selected: false, status: before.status }
-      : { ...s, manual: before ? before.manual : false, selected: true, status: 'queued' });
+      ? { ...before, ...s, selected: false, status: before.status, onDisk: true }
+      : { ...s, selected: true, status: 'queued', onDisk: true });
   }
-  // Folders the user added by hand, and finished settlements whose folder bot.js
-  // has already deleted, stay listed so their results remain reachable.
+  // Finished settlements whose folder bot.js has already deleted stay listed so
+  // their results remain reachable. onDisk: false marks them as rows only —
+  // removing one takes it off the list instead of deleting anything.
   for (const [id, item] of previous) {
     if (items.has(id)) continue;
-    if (item.manual || item.status === 'done' || item.status === 'error') items.set(id, { ...item, selected: false });
+    if (item.status === 'done' || item.status === 'error') items.set(id, { ...item, selected: false, onDisk: false });
   }
   render();
 }
 
-$('#btn-rescan').addEventListener('click', scanInbox);
-
-$('#btn-add-folder').addEventListener('click', async () => {
-  const dir = await window.rejsud.dialog.pickDirectory({ title: 'Choose a settlement folder' });
-  if (!dir) return;
-  const info = await window.rejsud.inbox.describe(dir);
-  items.set(info.id, { ...info, manual: true, selected: true, status: 'queued' });
+// Removing a saved settlement: the confirmation is a native dialog raised by the
+// main process, which is also what deletes the folder — the renderer only asks.
+async function removeSettlement(item) {
+  if (running || item.removing) return;
+  if (item.onDisk === false) {
+    items.delete(item.id);
+    render();
+    return;
+  }
+  // The confirmation is a sheet on the window, so a second click while it is
+  // open would queue a second one behind it.
+  item.removing = true;
   render();
-});
+  try {
+    const res = await window.rejsud.inbox.remove(item.path);
+    if (res && res.cancelled) return;
+    items.delete(item.id);
+    appendLog(
+      res && res.missing
+        ? `The folder for "${item.settlementName || item.folder}" was already gone — taken off the list.\n`
+        : `Removed the settlement "${item.settlementName || item.folder}" and its inbox folder.\n`,
+      'app'
+    );
+  } catch (err) {
+    alertMsg(clean(err));
+  } finally {
+    item.removing = false;
+    render();
+  }
+}
 
 /* -------------------------------------------------------------- running -- */
+// Submit or leave as a draft. One choice for the next run, shown on both
+// screens that can start one, and remembered so the next session opens on it.
+let submitAfterFiling = false;
+
+function setSubmitOption(value, { persist = true } = {}) {
+  submitAfterFiling = !!value;
+  $('#opt-submit').checked = submitAfterFiling;
+  $('#opt-submit-new').checked = submitAfterFiling;
+  if (persist) window.rejsud.settings.save({ submitAfterFiling }).catch(() => {});
+}
+
+for (const id of ['#opt-submit', '#opt-submit-new']) {
+  $(id).addEventListener('change', e => setSubmitOption(e.target.checked));
+}
+
 $('#btn-process').addEventListener('click', async () => {
   const targets = selected();
   if (!targets.length) return;
   for (const t of targets) {
     t.status = 'queued';
     t.error = null;
+    t.failure = null;
     t.manifest = null;
     t.manifestPath = null;
     t.outputFolder = null;
   }
   render();
   try {
-    await window.rejsud.run.start(targets.map(t => ({ id: t.id, path: t.path, folder: t.folder })));
+    const state = await window.rejsud.run.start(
+      targets.map(t => ({ id: t.id, path: t.path, folder: t.folder })),
+      { submit: submitAfterFiling }
+    );
+    // Declining the submit confirmation starts nothing — put the rows back.
+    if (state && state.cancelled) {
+      for (const t of targets) t.status = 'pending';
+      render();
+    }
   } catch (err) {
     appendLog(`\n${clean(err)}\n`, 'stderr');
     alertMsg(clean(err));
@@ -182,7 +431,7 @@ $('#btn-process').addEventListener('click', async () => {
 
 $('#btn-cancel').addEventListener('click', () => {
   window.rejsud.run.cancel();
-  appendLog('\nStopping. The current settlement is being cut short — its indfak2 draft may be left half-filled; review it, or remove it with "Delete a draft" in Settings.\n', 'app');
+  appendLog('\nStopping. The current settlement is being cut short — its indfak2 draft may be left half-filled; review it in indfak2 and delete it there if needed.\n', 'app');
 });
 
 let wasRunning = false;
@@ -193,36 +442,368 @@ function setRunning(state) {
   if (wasRunning && !running) scanInbox();
   wasRunning = running;
   $('#btn-cancel').hidden = !running;
-  $('#btn-rescan').disabled = running;
-  $('#btn-add-folder').disabled = running;
-  if (!running) $('#phase-label').textContent = '';
+  $('#btn-new').disabled = running;
+  syncComposeButtons();
+  if (!running) { statusLine.count = ''; statusLine.step = ''; $('#phase-label').textContent = ''; }
   render();
 }
 
 window.rejsud.onLog(({ text, stream }) => appendLog(text, stream));
 window.rejsud.onRunState(setRunning);
 
+// The status line pairs where the run is in the batch ("Filing 2/3 · x.pdf")
+// with what it is doing right now ("searching the card transactions"), so a
+// stall is legible while it is happening rather than only afterwards.
+const statusLine = { count: '', step: '' };
+function showStatus() {
+  const step = statusLine.step ? statusLine.step[0].toUpperCase() + statusLine.step.slice(1) : '';
+  $('#phase-label').textContent = [statusLine.count, step].filter(Boolean).join(' — ');
+}
 window.rejsud.onProgress(p => {
   if (p.event === 'phase') {
-    $('#phase-label').textContent =
-      { parsing: `Reading documents…`, planning: 'Planning settlement…', filing: 'Filing into indfak2…' }[p.phase] || '';
+    statusLine.count = { parsing: 'Reading documents', planning: 'Planning settlement',
+                         filing: 'Filing into indfak2', submitting: 'Submitting for approval' }[p.phase] || '';
+    statusLine.step = '';
   }
   if (p.event === 'progress') {
     const what = p.phase === 'parsing' ? 'Reading' : 'Filing';
-    $('#phase-label').textContent = `${what} ${p.index}/${p.total} · ${p.file}`;
+    statusLine.count = `${what} ${p.index}/${p.total} · ${p.file}`;
   }
+  // A step names the thing that can hang; it is also what a failure is
+  // attributed to, so the two always read the same way.
+  if (p.event === 'step') statusLine.step = p.label || '';
+  if (p.event === 'error') statusLine.step = '';
+  if (p.event === 'phase' || p.event === 'progress' || p.event === 'step' || p.event === 'error') showStatus();
 });
 
 window.rejsud.onSettlement(async p => {
   const item = items.get(p.id);
   if (!item) return;
-  item.status = p.status;
+  // A settlement that actually left for approval says so, rather than reading
+  // like every other finished run.
+  const submitted = !!(p.manifest && p.manifest.settlement && p.manifest.settlement.submit
+    && p.manifest.settlement.submit.submitted);
+  item.status = p.status === 'done' && submitted ? 'submitted' : p.status;
   item.error = p.error || null;
+  item.failure = p.failure || null;
   if (p.manifestPath) item.manifestPath = p.manifestPath;
   if (p.outputFolder) item.outputFolder = p.outputFolder;
   if (p.manifest) item.manifest = p.manifest;
   if (p.status !== 'running') item.selected = false;
   render();
+});
+
+/* ------------------------------------------------- new settlement page -- */
+// A dropped file outside the drop zone would otherwise navigate the window to it.
+window.addEventListener('dragover', e => e.preventDefault());
+window.addEventListener('drop', e => e.preventDefault());
+
+// Either a list of dropped/picked files, or one declared folder — never both,
+// which is what "use a folder instead" means.
+const compose = { files: [], sourceFolder: null, skipped: [] };
+
+function openNewPage() {
+  compose.files = [];
+  compose.sourceFolder = null;
+  compose.skipped = [];
+  $('#n-name').value = '';
+  $('#n-folder').value = '';
+  $('#n-alias-name').value = '';
+  $('#n-alias-code').value = '';
+  // Re-read rather than trust the mirror: the library may have been edited in
+  // Settings since the page was last open.
+  window.rejsud.settings.get().then(s => {
+    adoptAliases(s);
+    fillAliasSelect(aliasLib.defaultCode);
+    refreshCompose();
+  });
+  flash('#new-msg', '', '');
+  showView('new');
+  $('#n-name').focus();
+}
+
+// --- alias dropdown ---------------------------------------------------------
+function fillAliasSelect(preferredCode) {
+  const sel = $('#n-alias');
+  sel.textContent = '';
+  for (const alias of aliasLib.list) {
+    const opt = el('option', null, alias.name === alias.code ? alias.code : `${alias.name} — ${alias.code}`);
+    opt.value = alias.code;
+    sel.appendChild(opt);
+  }
+  const fresh = el('option', null, aliasLib.list.length ? 'New alias…' : 'New alias — none saved yet');
+  fresh.value = NEW_ALIAS;
+  sel.appendChild(fresh);
+  sel.value = aliasLib.list.some(a => a.code === preferredCode) ? preferredCode
+    : aliasLib.list.length ? aliasLib.list[0].code
+    : NEW_ALIAS;
+  syncAliasMode();
+}
+
+// The name/code pair is only on screen while "New alias…" is the selection.
+function syncAliasMode() {
+  $('#n-alias-new').hidden = $('#n-alias').value !== NEW_ALIAS;
+}
+
+function currentAliasCode() {
+  const sel = $('#n-alias');
+  return sel.value === NEW_ALIAS ? $('#n-alias-code').value.trim() : sel.value;
+}
+
+$('#n-alias').addEventListener('change', () => {
+  syncAliasMode();
+  if ($('#n-alias').value === NEW_ALIAS) $('#n-alias-name').focus();
+  refreshCompose();
+});
+
+// Puts the typed alias in the library and selects it. The run does this too, so
+// this is only for saving one without filing a settlement behind it.
+async function saveTypedAlias() {
+  const { settings, alias, added } = await window.rejsud.settings.addAlias({
+    name: $('#n-alias-name').value,
+    code: $('#n-alias-code').value,
+  });
+  adoptAliases(settings);
+  fillAliasSelect(alias.code);
+  return { alias, added };
+}
+
+$('#btn-alias-save').addEventListener('click', async () => {
+  try {
+    const { alias, added } = await saveTypedAlias();
+    flash('#new-msg', added ? `Added "${alias.name}" to the library.` : `"${alias.name}" was already in the library.`, 'ok');
+  } catch (err) {
+    flash('#new-msg', clean(err), 'err');
+    return;
+  }
+  refreshCompose();
+});
+
+$('#btn-new').addEventListener('click', openNewPage);
+$('#btn-new-back').addEventListener('click', () => showView('run'));
+$('#btn-new-cancel').addEventListener('click', () => showView('run'));
+
+// --- receipts ---------------------------------------------------------------
+async function addPaths(paths) {
+  if (!paths.length) return;
+  const { files, skipped } = await window.rejsud.inbox.expand(paths);
+  // A drop replaces a declared folder: the two sources are alternatives.
+  if (compose.sourceFolder) {
+    compose.sourceFolder = null;
+    $('#n-folder').value = '';
+    compose.files = [];
+  }
+  const known = new Set(compose.files.map(f => f.path));
+  for (const f of files) if (!known.has(f.path)) compose.files.push(f);
+  compose.skipped = skipped;
+  refreshCompose();
+}
+
+const dropzone = $('#dropzone');
+['dragenter', 'dragover'].forEach(evt =>
+  dropzone.addEventListener(evt, e => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!compose.sourceFolder) dropzone.classList.add('is-over');
+  })
+);
+['dragleave', 'dragend'].forEach(evt =>
+  dropzone.addEventListener(evt, () => dropzone.classList.remove('is-over'))
+);
+dropzone.addEventListener('drop', async e => {
+  e.preventDefault();
+  e.stopPropagation();
+  dropzone.classList.remove('is-over');
+  const paths = [...e.dataTransfer.files].map(f => window.rejsud.pathForFile(f)).filter(Boolean);
+  await addPaths(paths);
+});
+dropzone.addEventListener('click', e => {
+  if (e.target.id !== 'btn-choose-files') $('#btn-choose-files').click();
+});
+
+$('#btn-choose-files').addEventListener('click', async () => {
+  const paths = await window.rejsud.dialog.pickFiles({ title: 'Choose receipts' });
+  await addPaths(paths || []);
+});
+
+$('#btn-pick-source').addEventListener('click', async () => {
+  const dir = await window.rejsud.dialog.pickDirectory({ title: 'Choose a folder of receipts' });
+  if (!dir) return;
+  const { files, skipped } = await window.rejsud.inbox.expand([dir]);
+  compose.sourceFolder = dir;
+  compose.files = files;
+  compose.skipped = skipped;
+  $('#n-folder').value = dir;
+  refreshCompose();
+});
+
+$('#btn-clear-source').addEventListener('click', () => {
+  compose.sourceFolder = null;
+  compose.files = [];
+  compose.skipped = [];
+  $('#n-folder').value = '';
+  refreshCompose();
+});
+
+function renderFileList() {
+  const list = $('#n-files');
+  list.textContent = '';
+  for (const file of compose.files) {
+    const li = el('li', 'fileitem');
+    li.appendChild(el('span', 'fileitem-name', file.name));
+    // Files come as a set from a declared folder, so they are removed as a set.
+    if (!compose.sourceFolder) {
+      const rm = el('button', 'fileitem-x', '×');
+      rm.title = `Remove ${file.name}`;
+      rm.addEventListener('click', () => {
+        compose.files = compose.files.filter(f => f.path !== file.path);
+        refreshCompose();
+      });
+      li.appendChild(rm);
+    }
+    list.appendChild(li);
+  }
+
+  const source = $('#n-source');
+  source.hidden = !compose.files.length && !compose.sourceFolder;
+  const n = compose.files.length;
+  source.textContent = compose.sourceFolder
+    ? `${n} document${n === 1 ? '' : 's'} from this folder will be copied into the settlement.`
+    : `${n} receipt${n === 1 ? '' : 's'} ready.`;
+
+  const skipped = $('#n-skipped');
+  skipped.hidden = !compose.skipped.length;
+  skipped.textContent = compose.skipped.length
+    ? `Skipped: ${compose.skipped.map(s => `${s.name} (${s.reason})`).join(', ')}`
+    : '';
+
+  dropzone.classList.toggle('is-disabled', !!compose.sourceFolder);
+  $('#dropzone .dropzone-main').textContent = compose.sourceFolder ? 'Using a folder' : 'Drop receipts here';
+  $('#btn-clear-source').hidden = !compose.sourceFolder;
+}
+
+// --- name/alias preview -----------------------------------------------------
+let proposal = null;
+// propose() is an IPC round-trip, so two edits in flight can answer out of
+// order; only the newest one is allowed to write the preview.
+let composeSeq = 0;
+
+async function refreshCompose() {
+  renderFileList();
+  const seq = ++composeSeq;
+  const name = $('#n-name').value;
+  const alias = currentAliasCode();
+  // The alias now always has a value, so an untouched page would otherwise open
+  // on "Give the settlement a name." — wait for step 1 before previewing.
+  const answer = name.trim() ? await window.rejsud.inbox.propose({ name, alias }) : null;
+  if (seq !== composeSeq) return;
+
+  proposal = answer;
+  const preview = $('#n-preview');
+  if (!answer) {
+    preview.textContent = '';
+    preview.className = 'hint';
+  } else if (!answer.ok) {
+    preview.textContent = answer.error;
+    preview.className = 'hint hint-warn';
+  } else if (answer.exists) {
+    preview.textContent = `A settlement folder "${answer.folder}" already exists — choose another name.`;
+    preview.className = 'hint hint-warn';
+  } else {
+    preview.textContent = `Draft "* ${answer.settlementName}" · folder ${answer.folder}`;
+    preview.className = 'hint';
+  }
+
+  syncComposeButtons();
+}
+
+// Composing during a run is fine, and so is saving one — only starting a second
+// run is not.
+function syncComposeButtons() {
+  const ready = !!proposal && proposal.ok && !proposal.exists && compose.files.length > 0;
+  $('#btn-run-new').disabled = running || !ready;
+  $('#btn-save-new').disabled = !ready;
+}
+
+let composeTimer = null;
+for (const id of ['#n-name', '#n-alias-name', '#n-alias-code']) {
+  $(id).addEventListener('input', () => {
+    clearTimeout(composeTimer);
+    composeTimer = setTimeout(refreshCompose, 150);
+  });
+}
+
+// --- save / run -------------------------------------------------------------
+// Writes the inbox folder and copies the receipts into it. Both buttons do this;
+// only "Run settlement" hands the result to the runner afterwards. Returns null
+// when it failed — the message is already on screen.
+async function createFromCompose(btn) {
+  // A newly typed alias joins the library here, so the next settlement can pick
+  // it from the dropdown. A code that is already in there just gets selected.
+  try {
+    if ($('#n-alias').value === NEW_ALIAS) await saveTypedAlias();
+    return await window.rejsud.inbox.create({
+      name: $('#n-name').value,
+      alias: currentAliasCode(),
+      files: compose.files.map(f => f.path),
+    });
+  } catch (err) {
+    flash('#new-msg', clean(err), 'err');
+    btn.disabled = false;
+    return null;
+  }
+}
+
+// Saved, not started: it waits in the settlement list until "Process". Kept
+// selected so several saved in a row can be processed as one batch.
+$('#btn-save-new').addEventListener('click', async () => {
+  const btn = $('#btn-save-new');
+  btn.disabled = true;
+  flash('#new-msg', 'Saving the folder…', '');
+
+  const created = await createFromCompose(btn);
+  if (!created) return;
+
+  items.set(created.id, { ...created, selected: true, status: 'queued', onDisk: true });
+  showView('run');
+  render();
+  flash('#new-msg', '', '');
+  btn.disabled = false;
+});
+
+$('#btn-run-new').addEventListener('click', async () => {
+  const btn = $('#btn-run-new');
+  btn.disabled = true;
+  flash('#new-msg', 'Preparing the folder…', '');
+
+  const created = await createFromCompose(btn);
+  if (!created) return;
+
+  // Show it in the list as the one thing about to run, then hand it to the runner:
+  // its status becomes "Running" as soon as bot.js is spawned.
+  for (const item of items.values()) item.selected = false;
+  items.set(created.id, { ...created, selected: true, status: 'queued', onDisk: true });
+  showView('run');
+  render();
+
+  try {
+    const state = await window.rejsud.run.start(
+      [{ id: created.id, path: created.path, folder: created.folder }],
+      { submit: submitAfterFiling }
+    );
+    // Declining the submit confirmation leaves the folder saved but unrun.
+    if (state && state.cancelled) {
+      const item = items.get(created.id);
+      if (item) item.status = 'pending';
+      render();
+    }
+    flash('#new-msg', '', '');
+  } catch (err) {
+    appendLog(`\n${clean(err)}\n`, 'stderr');
+    alertMsg(clean(err));
+  } finally {
+    btn.disabled = false;
+  }
 });
 
 /* ------------------------------------------------------------ TOTP modal -- */
@@ -272,6 +853,17 @@ function showResult(item) {
     meta.textContent = `Draft "${s.draft_name}"${s.settlement_number ? ` · no. ${s.settlement_number}` : ''} · ${s.status}`;
     body.appendChild(meta);
 
+    // Only worth a line when submitting was asked for: otherwise "draft" is the
+    // expected outcome and s.status already says it.
+    const sub = s.submit;
+    if (sub && sub.requested) {
+      const line = el('p', sub.submitted ? 'msg ok' : 'msg err');
+      line.textContent = sub.submitted
+        ? 'Sent for approval.'
+        : `Not submitted — ${sub.skipped_reason || sub.errors.join(' | ') || 'reason unknown'}. It is still a draft in indfak2.`;
+      body.appendChild(line);
+    }
+
     const table = el('table');
     const head = el('tr');
     for (const h of ['Document', 'Role', 'Filed as', 'Notes']) head.appendChild(el('th', null, h));
@@ -282,7 +874,17 @@ function showResult(item) {
       tr.appendChild(el('td', null, inv.file));
       tr.appendChild(el('td', null, inv.role || '—'));
       tr.appendChild(el('td', null, inv.expense_type || '—'));
-      tr.appendChild(el('td', null, (inv.errors && inv.errors.join('; ')) || (inv.moved_to_output ? 'OK' : 'left in inbox')));
+      const note = el('td', null, (inv.errors && inv.errors.join('; ')) || (inv.moved_to_output ? 'OK' : 'left in inbox'));
+      const d = inv.error_detail;
+      if (d) {
+        if (d.hint) note.appendChild(el('div', 'failure-hint', d.hint));
+        if (d.screenshot) {
+          const b = el('button', 'btn btn-quiet', 'Screenshot');
+          b.addEventListener('click', () => window.rejsud.shell.openPath(d.screenshot));
+          note.appendChild(b);
+        }
+      }
+      tr.appendChild(note);
       table.appendChild(tr);
     }
     for (const doc of m.supporting_documents || []) {
@@ -314,9 +916,7 @@ function alertMsg(text) {
 
 /* -------------------------------------------------------------- settings -- */
 const SETTING_FIELDS = {
-  receiptsInbox: 's-inbox',
   claimsOutput: 's-output',
-  expenseAlias: 's-alias',
   expenseAliasOption: 's-alias-option',
   expenseType: 's-type',
   expensePurpose: 's-purpose',
@@ -327,12 +927,120 @@ async function loadSettings() {
   const s = await window.rejsud.settings.get();
   for (const [key, id] of Object.entries(SETTING_FIELDS)) $(`#${id}`).value = s[key] ?? '';
   $('#s-headless').checked = !!s.headless;
+  applyTheme(s.theme);
+  $('#s-submit-confirm').checked = !s.submitConfirmSuppressed;
+  setSubmitOption(s.submitAfterFiling, { persist: false });
+  adoptLayout(s.layout);
+  adoptAliases(s);
+  renderAliasRows(); // adoptAliases skips it when nothing moved; the first load still needs it
 }
 
+// --- alias library editor ---------------------------------------------------
+// The rows are the editable copy: they are rendered from the library once and
+// then read back on save, so a half-typed code is never normalized away
+// under the cursor.
+function aliasRow({ name = '', code = '' } = {}) {
+  const li = el('li', 'aliasrow');
+
+  const pick = el('input');
+  pick.type = 'radio';
+  pick.name = 'alias-default';
+  pick.className = 'alias-default';
+  pick.title = 'Preselect this alias for a new settlement';
+  pick.checked = !!code && code === aliasLib.defaultCode;
+  li.appendChild(pick);
+
+  for (const [cls, placeholder, value] of [
+    ['alias-name', 'Short name', name],
+    ['mono alias-code', '1240351001', code],
+  ]) {
+    const input = el('input', cls);
+    input.type = 'text';
+    input.spellcheck = false;
+    input.autocomplete = 'off';
+    input.placeholder = placeholder;
+    input.value = value;
+    li.appendChild(input);
+  }
+
+  const rm = el('button', 'fileitem-x', '×');
+  rm.title = 'Remove this alias';
+  rm.addEventListener('click', () => {
+    li.remove();
+    syncAliasRows();
+  });
+  li.appendChild(rm);
+  return li;
+}
+
+function renderAliasRows() {
+  const list = $('#alias-list');
+  if (!list) return;
+  list.textContent = '';
+  for (const alias of aliasLib.list) list.appendChild(aliasRow(alias));
+  syncAliasRows();
+}
+
+function syncAliasRows() {
+  $('#alias-empty').hidden = $('#alias-list').children.length > 0;
+}
+
+function collectAliasRows() {
+  return [...$('#alias-list').children]
+    .map(row => ({
+      name: row.querySelector('.alias-name').value.trim(),
+      code: row.querySelector('.alias-code').value.trim(),
+      isDefault: row.querySelector('.alias-default').checked,
+    }))
+    // A row left entirely blank is an abandoned "Add alias", not an error.
+    .filter(a => a.name || a.code);
+}
+
+$('#btn-add-alias').addEventListener('click', () => {
+  const row = aliasRow();
+  $('#alias-list').appendChild(row);
+  syncAliasRows();
+  row.querySelector('.alias-name').focus();
+});
+
+// The library lives on its own page, so a settings patch leaves `aliases` out
+// entirely — the store keeps whatever is already there.
+$('#btn-save-aliases').addEventListener('click', async () => {
+  const rows = collectAliasRows();
+  const patch = { aliases: rows.map(({ name, code }) => ({ name, code })) };
+  // The marked row is what a new settlement starts on; with none marked, the
+  // first one is (which is what the store would settle on anyway).
+  const chosen = rows.find(a => a.isDefault) || rows[0];
+  if (chosen) patch.expenseAlias = chosen.code;
+
+  let saved;
+  try {
+    // Rejects on a malformed or duplicated alias code, naming the offender.
+    saved = await window.rejsud.settings.save(patch);
+  } catch (err) {
+    flash('#aliases-msg', clean(err), 'err');
+    return;
+  }
+  adoptAliases(saved);
+  flash('#aliases-msg', 'Saved.', 'ok');
+  render(); // settlement rows name their alias out of the library
+});
+
 $('#btn-save-settings').addEventListener('click', async () => {
-  const patch = { headless: $('#s-headless').checked };
+  const patch = {
+    headless: $('#s-headless').checked,
+    submitConfirmSuppressed: !$('#s-submit-confirm').checked,
+  };
   for (const [key, id] of Object.entries(SETTING_FIELDS)) patch[key] = $(`#${id}`).value.trim();
-  await window.rejsud.settings.save(patch);
+
+  let saved;
+  try {
+    saved = await window.rejsud.settings.save(patch);
+  } catch (err) {
+    flash('#settings-msg', clean(err), 'err');
+    return;
+  }
+  adoptAliases(saved);
   flash('#settings-msg', 'Saved.', 'ok');
   scanInbox();
 });
@@ -361,6 +1069,19 @@ const CRED_FIELDS = {
   ANTHROPIC_API_KEY: 'c-key',
 };
 
+// What a run cannot start without. TOTP_SECRET is deliberately not one of them:
+// without it the app simply asks for a code mid-run.
+const REQUIRED_CREDS = ['INDFAK_USERNAME', 'INDFAK_PASSWORD', 'ANTHROPIC_API_KEY'];
+const CRED_LABELS = {
+  INDFAK_USERNAME: 'username',
+  INDFAK_PASSWORD: 'password',
+  ANTHROPIC_API_KEY: 'Anthropic API key',
+};
+let credsReady = false;
+// True while the app is parked on Settings only because credentials are
+// missing — filling them in then hands the user over to the settlement list.
+let credsGate = false;
+
 async function loadCredStatus() {
   const st = await window.rejsud.credentials.status();
   for (const key of Object.keys(CRED_FIELDS)) {
@@ -379,6 +1100,19 @@ async function loadCredStatus() {
     notice.textContent =
       'Some credentials are currently coming from the development .env file next to bot.js. Import them into the Keychain so the packaged app no longer depends on that file.';
   }
+
+  const missing = REQUIRED_CREDS.filter(k => st[k] === 'missing');
+  credsReady = missing.length === 0;
+  const required = $('#creds-required');
+  required.hidden = credsReady;
+  if (!credsReady) {
+    const names = missing.map(k => CRED_LABELS[k]);
+    const list = names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}` : names[0];
+    required.textContent =
+      `No settlement can run until the ${list} ${names.length > 1 ? 'are' : 'is'} stored. ` +
+      'The app opens on this page until then.';
+  }
+  return st;
 }
 
 $('#btn-save-creds').addEventListener('click', async () => {
@@ -393,6 +1127,10 @@ $('#btn-save-creds').addEventListener('click', async () => {
     for (const id of Object.values(CRED_FIELDS)) $(`#${id}`).value = '';
     await loadCredStatus();
     flash('#creds-msg', 'Saved to Keychain.', 'ok');
+    if (credsGate && credsReady) {
+      credsGate = false;
+      showView('run');
+    }
   } catch (err) {
     flash('#creds-msg', clean(err), 'err');
   }
@@ -409,7 +1147,15 @@ $('#btn-import-env').addEventListener('click', async () => {
 });
 
 /* --------------------------------------------------------------- browser -- */
-async function refreshBrowserStatus() {
+// Probing spawns a node child per candidate path, so concurrent callers (init
+// and the Settings tab opening at the same moment) share one round-trip.
+let browserProbe = null;
+function refreshBrowserStatus() {
+  if (!browserProbe) browserProbe = probeBrowser().finally(() => (browserProbe = null));
+  return browserProbe;
+}
+
+async function probeBrowser() {
   const st = await window.rejsud.browser.status();
   const node = $('#browser-status');
   const badge = $('#browser-badge');
@@ -450,28 +1196,15 @@ window.rejsud.onBrowserProgress(({ line }) => {
   appendLog(line + '\n', 'app');
 });
 
-/* ---------------------------------------------------------------- drafts -- */
-$('#btn-delete-draft').addEventListener('click', async () => {
-  const name = $('#d-name').value.trim();
-  if (!name) return flash('#draft-msg', 'Enter part of a draft name.', 'err');
-  const btn = $('#btn-delete-draft');
-  btn.disabled = true;
-  flash('#draft-msg', 'Opening indfak2…', '');
-  try {
-    await window.rejsud.drafts.delete(name);
-    flash('#draft-msg', 'Done — see the log for what was deleted.', 'ok');
-  } catch (err) {
-    flash('#draft-msg', clean(err), 'err');
-  } finally {
-    btn.disabled = false;
-  }
-});
-
 /* ------------------------------------------------------------------ init -- */
 (async function init() {
   await loadSettings();
   await loadCredStatus();
   await scanInbox();
+  // Nothing can run without credentials, so an install that has none opens on
+  // Settings; once they are stored the app opens on the settlement list.
+  credsGate = !credsReady;
+  showView(credsReady ? 'run' : 'settings');
   const st = await refreshBrowserStatus();
   if (!st.installed) {
     appendLog('Chromium is not installed yet — open Settings and download it before the first run.\n', 'app');

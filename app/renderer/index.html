@@ -9,8 +9,13 @@
 </head>
 <body>
   <header class="titlebar">
+    <div class="brand">
+      <img class="brand-mark" src="logo.svg" alt="" width="24" height="24" />
+      <span class="brand-name">REJSUD<em>ai</em></span>
+    </div>
     <div class="tabs" role="tablist">
       <button class="tab is-active" data-view="run" role="tab">Settlements</button>
+      <button class="tab" data-view="aliases" role="tab">Aliases</button>
       <button class="tab" data-view="settings" role="tab">Settings</button>
     </div>
     <div class="titlebar-right">
@@ -22,13 +27,10 @@
   <main id="view-run" class="view">
     <section class="panel panel-list">
       <div class="panel-head">
-        <div>
-          <h2>Pending settlements</h2>
-          <p id="inbox-path" class="subtle mono"></p>
-        </div>
+        <button id="btn-new" class="btn btn-primary">Create settlement</button>
         <div class="head-actions">
-          <button id="btn-rescan" class="btn btn-quiet" title="Rescan the inbox">Rescan</button>
-          <button id="btn-add-folder" class="btn btn-quiet">Add folder…</button>
+          <button id="btn-cancel" class="btn btn-danger" hidden>Stop</button>
+          <button id="btn-process" class="btn btn-primary" disabled>Process settlements</button>
         </div>
       </div>
 
@@ -39,28 +41,160 @@
           <input type="checkbox" id="select-all" />
           <span id="selection-summary">Nothing selected</span>
         </label>
-        <div class="grow"></div>
-        <button id="btn-cancel" class="btn btn-danger" hidden>Stop</button>
-        <button id="btn-process" class="btn btn-primary" disabled>Process</button>
+        <label class="checkline checkline-end" title="Off: each settlement is left as a draft in indfak2 for you to review and send yourself.">
+          <input type="checkbox" id="opt-submit" />
+          <span>Submit for approval</span>
+        </label>
       </div>
 
       <ul id="settlement-list" class="settlements"></ul>
       <p id="empty-state" class="empty" hidden>
         No pending settlements.<br />
-        <span class="subtle">Drop a folder named <code>&lt;alias&gt;-&lt;name&gt;</code> into the inbox, or use “Add folder…”.</span>
+        <span class="subtle">Press “Create settlement” to put one together.</span>
       </p>
     </section>
 
-    <section class="panel panel-log">
-      <div class="panel-head">
-        <h2>Log</h2>
-        <div class="head-actions">
-          <span id="phase-label" class="subtle"></span>
-          <button id="btn-clear-log" class="btn btn-quiet">Clear</button>
+    <div class="resizer resizer-x" id="resize-list" role="separator" aria-orientation="vertical"
+         aria-label="Resize the settlement list" tabindex="0" title="Drag to resize · double-click to reset"></div>
+
+    <div class="panel-right">
+      <section class="panel panel-browser">
+        <div class="panel-head">
+          <h2>Browser</h2>
+          <div class="head-actions">
+            <span id="browser-live" class="badge badge-live" hidden>Live</span>
+            <button id="btn-browser-expand" class="btn btn-quiet" aria-pressed="false">Expand</button>
+          </div>
         </div>
-      </div>
-      <pre id="log" class="log" aria-live="polite"></pre>
-    </section>
+        <div class="browser-stage">
+          <img id="browser-frame" alt="Live view of the automated browser" hidden />
+          <p id="browser-idle" class="browser-idle">
+            Chromium appears here while a settlement is being filed.
+          </p>
+        </div>
+      </section>
+
+      <div class="resizer resizer-y" id="resize-browser" role="separator" aria-orientation="horizontal"
+           aria-label="Resize the browser pane" tabindex="0" title="Drag to resize · double-click to reset"></div>
+
+      <section class="panel panel-log">
+        <div class="panel-head">
+          <h2>Log</h2>
+          <div class="head-actions">
+            <span id="phase-label" class="subtle"></span>
+            <button id="btn-clear-log" class="btn btn-quiet">Clear</button>
+          </div>
+        </div>
+        <pre id="log" class="log" aria-live="polite"></pre>
+      </section>
+    </div>
+  </main>
+
+  <!-- ======================== NEW SETTLEMENT VIEW ======================== -->
+  <main id="view-new" class="view" hidden>
+    <div class="new-scroll">
+      <section class="card">
+        <div class="new-head">
+          <div>
+            <h2>New settlement</h2>
+            <p class="subtle">Prepares the settlement folder in your receipts inbox and files it into indfak2 straight away.</p>
+          </div>
+          <button id="btn-new-back" class="btn btn-quiet">← Settlements</button>
+        </div>
+
+        <div class="step">
+          <span class="step-n">1</span>
+          <div class="step-body">
+            <label for="n-name">Name</label>
+            <input id="n-name" type="text" spellcheck="false" autocomplete="off" placeholder="Oslo conference" />
+            <p id="n-preview" class="hint"></p>
+          </div>
+        </div>
+
+        <div class="step">
+          <span class="step-n">2</span>
+          <div class="step-body">
+            <label for="n-alias">Alias</label>
+            <select id="n-alias"></select>
+            <div id="n-alias-new" class="alias-new" hidden>
+              <div class="field-row">
+                <input id="n-alias-name" type="text" spellcheck="false" autocomplete="off"
+                       placeholder="Short name — e.g. Microbiome grant" />
+                <input id="n-alias-code" type="text" spellcheck="false" autocomplete="off"
+                       class="mono alias-code" placeholder="1240351001" />
+                <button id="btn-alias-save" class="btn btn-quiet">Add to library</button>
+              </div>
+              <p class="hint">Added to the library when the settlement runs — the button just saves it now.</p>
+            </div>
+            <p class="hint">The project these costs are booked on. The library lives on the Aliases page.</p>
+          </div>
+        </div>
+
+        <div class="step">
+          <span class="step-n">3</span>
+          <div class="step-body">
+            <label>Receipts</label>
+            <div id="dropzone" class="dropzone">
+              <div class="dropzone-main">Drop receipts here</div>
+              <div class="dropzone-sub">
+                PDF, PNG, JPEG or HEIC — dropped folders are expanded ·
+                <button id="btn-choose-files" class="linkish" type="button">choose files…</button>
+              </div>
+            </div>
+
+            <p id="n-source" class="hint" hidden></p>
+            <ul id="n-files" class="filelist"></ul>
+            <p id="n-skipped" class="hint hint-warn" hidden></p>
+
+            <div class="folder-alt">
+              <div class="or"><span>or use a folder instead</span></div>
+              <div class="field-row">
+                <input id="n-folder" type="text" class="mono" spellcheck="false" readonly
+                       placeholder="No folder chosen — every document inside it is used" />
+                <button id="btn-pick-source" class="btn btn-quiet">Choose folder…</button>
+                <button id="btn-clear-source" class="btn btn-quiet" hidden>Clear</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="actions">
+          <label class="checkline" title="Off: the settlement is left as a draft in indfak2 for you to review and send yourself.">
+            <input type="checkbox" id="opt-submit-new" />
+            <span>Submit for approval</span>
+          </label>
+          <button id="btn-run-new" class="btn btn-primary" disabled>Run settlement</button>
+          <button id="btn-save-new" class="btn" disabled>Save settlement</button>
+          <button id="btn-new-cancel" class="btn btn-quiet">Cancel</button>
+          <span id="new-msg" class="msg"></span>
+        </div>
+        <p class="hint">Receipts are copied into the inbox folder — your originals stay where they are.
+          Saving keeps the settlement in the list to process later; running files it now.</p>
+      </section>
+    </div>
+  </main>
+
+  <!-- ========================== ALIASES VIEW ========================== -->
+  <main id="view-aliases" class="view" hidden>
+    <div class="settings-scroll">
+      <section class="card">
+        <h2>Project aliases</h2>
+        <p class="subtle">
+          The projects you book costs on. Each one is a short name of your own plus the alias code indfak2
+          knows it by; the New settlement page picks from this list.
+        </p>
+        <ul id="alias-list" class="aliaslist"></ul>
+        <p id="alias-empty" class="hint" hidden>No aliases yet — add one, or create it while composing a settlement.</p>
+        <div class="actions">
+          <button id="btn-add-alias" class="btn btn-quiet">Add alias</button>
+          <span class="subtle">The marked one is preselected for a new settlement.</span>
+        </div>
+        <div class="actions">
+          <button id="btn-save-aliases" class="btn btn-primary">Save aliases</button>
+          <span id="aliases-msg" class="msg"></span>
+        </div>
+      </section>
+    </div>
   </main>
 
   <!-- ========================== SETTINGS VIEW ========================== -->
@@ -72,6 +206,7 @@
           Stored encrypted in your macOS Keychain via Electron <code>safeStorage</code>, and passed to the
           automation only for the length of a run. Leave a field blank to keep the saved value.
         </p>
+        <div id="creds-required" class="notice notice-warn" hidden></div>
         <div id="creds-source" class="notice notice-info" hidden></div>
 
         <div class="field">
@@ -95,7 +230,8 @@
             <span class="state" data-state-for="TOTP_SECRET"></span>
           </div>
           <p class="hint">
-            The Base32 secret from your indfak2 authenticator enrolment — the app generates 2FA codes itself.
+            The 16-character code shown under the QR code when you enrol two-factor authentication on
+            indfak2 — copy-paste it here and the app generates 2FA codes itself.
             Without it, each run stops and asks you for a code.
             <button id="btn-totp-help" class="linkish" type="button">How do I get it?</button>
           </p>
@@ -106,7 +242,13 @@
             <input id="c-key" type="password" autocomplete="off" spellcheck="false" placeholder="sk-ant-…" />
             <span class="state" data-state-for="ANTHROPIC_API_KEY"></span>
           </div>
-          <p class="hint">Used to read the invoices. It is the only external service the app talks to besides indfak2.dk.</p>
+          <p class="hint">
+            Used to read the invoices — the only external service the app talks to besides indfak2.dk.
+            Create one at <a class="linkish" href="https://console.anthropic.com/settings/keys"
+            target="_blank" rel="noreferrer">console.anthropic.com</a> → Settings → API keys → “Create key”,
+            on an account that has billing set up. It begins with <span class="mono">sk-ant-</span> and is
+            shown only once, so copy it straight into this field.
+          </p>
         </div>
         <div class="actions">
           <button id="btn-save-creds" class="btn btn-primary">Save credentials</button>
@@ -117,13 +259,6 @@
 
       <section class="card">
         <h2>Folders</h2>
-        <div class="field">
-          <label for="s-inbox">Receipts inbox</label>
-          <div class="field-row">
-            <input id="s-inbox" type="text" spellcheck="false" class="mono" />
-            <button class="btn btn-quiet" data-pick="s-inbox" data-pick-title="Choose the receipts inbox">Choose…</button>
-          </div>
-        </div>
         <div class="field">
           <label for="s-output">Claims output</label>
           <div class="field-row">
@@ -137,12 +272,9 @@
         <h2>Expense defaults</h2>
         <p class="subtle">Used for settlements that are not detected as travel. Trips select the travel type and purpose automatically.</p>
         <div class="field">
-          <label for="s-alias">Project alias</label>
-          <input id="s-alias" type="text" spellcheck="false" />
-        </div>
-        <div class="field">
           <label for="s-alias-option">Alias option (full label)</label>
           <input id="s-alias-option" type="text" spellcheck="false" />
+          <p class="hint">Only used for a settlement that carries no alias of its own, where the alias is picked from indfak2’s pinned list by its full label instead.</p>
         </div>
         <div class="field">
           <label for="s-type">Type</label>
@@ -160,27 +292,37 @@
       </section>
 
       <section class="card">
+        <h2>Submitting</h2>
+        <label class="checkline">
+          <input type="checkbox" id="s-submit-confirm" />
+          <span>Ask before submitting a settlement</span>
+        </label>
+        <p class="hint">A settlement is only sent for approval when “Submit for approval” is ticked on the run, and only if every document made it into the draft — anything left over stays a draft. This confirmation is the last stop before it leaves for your approver.</p>
+      </section>
+
+      <section class="card">
+        <h2>Appearance</h2>
+        <p class="subtle">Auto follows your macOS appearance and turns with it.</p>
+        <div class="segmented" role="radiogroup" aria-label="Appearance">
+          <label class="segment"><input type="radio" name="theme" value="auto" /><span>Auto</span></label>
+          <label class="segment"><input type="radio" name="theme" value="light" /><span>Light</span></label>
+          <label class="segment"><input type="radio" name="theme" value="dark" /><span>Dark</span></label>
+        </div>
+        <p class="hint">Applies as you pick it — this one is not waiting on “Save settings”.</p>
+      </section>
+
+      <section class="card">
         <h2>Browser</h2>
         <label class="checkline">
           <input type="checkbox" id="s-headless" />
           <span>Run Chromium hidden (headless)</span>
         </label>
-        <p class="hint">Off by default so you can watch the automation and step in if indfak2 asks something unexpected.</p>
+        <p class="hint">The Browser pane mirrors the run either way. Turn this on to keep Chromium off your screen; leave it off to be able to click into the real window if indfak2 asks something unexpected.</p>
         <div id="browser-status" class="notice notice-info"></div>
         <div class="actions">
           <button id="btn-install-browser" class="btn btn-quiet">Download Chromium…</button>
           <span id="browser-msg" class="msg"></span>
         </div>
-      </section>
-
-      <section class="card">
-        <h2>Delete a draft</h2>
-        <p class="subtle">Deletes every indfak2 draft whose name contains this text. Useful after a crashed run left a half-filled draft behind.</p>
-        <div class="field-row">
-          <input id="d-name" type="text" spellcheck="false" placeholder="part of the draft name" />
-          <button id="btn-delete-draft" class="btn btn-danger">Delete drafts…</button>
-        </div>
-        <p id="draft-msg" class="msg"></p>
       </section>
 
       <section class="card">
@@ -223,10 +365,20 @@
       <h3>Getting your TOTP secret</h3>
       <ol class="steps">
         <li>Log in to <span class="mono">indfak2.dk</span> in your browser and open your account security settings.</li>
-        <li>Start re-enrolling two-factor authentication. When the QR code appears, look for the
-            “can’t scan / enter manually” link — that shows the Base32 secret.</li>
-        <li>Paste that secret here and finish the enrolment in your authenticator app as usual.</li>
+        <li>Start re-enrolling two-factor authentication. A QR code appears — and printed
+            <strong>directly underneath it is a 16-character code</strong>, shown so you can type it into an
+            authenticator by hand. That code <em>is</em> the secret.</li>
+        <li><strong>Copy-paste that 16-character code into the field here.</strong> Copy it exactly as shown;
+            if indfak2 prints it in spaced groups, delete the spaces first.</li>
+        <li>Finish the enrolment as usual — scan the same QR code with your phone’s authenticator app.
+            Both it and this app then generate the same codes from that one secret.</li>
       </ol>
+      <p class="subtle">
+        The code is <span class="mono">A–Z</span> and <span class="mono">2–7</span> only — never a
+        <span class="mono">0</span>, <span class="mono">1</span>, <span class="mono">8</span> or
+        <span class="mono">9</span>. It is <em>not</em> the 6-digit number your authenticator shows: that one
+        changes every 30 seconds, while this one is the fixed seed it is generated from, and you copy it once.
+      </p>
       <p class="subtle">
         The repository also ships <span class="mono">setup-totp.js</span>, which drives the same flow in a
         scripted browser and reads the secret out of the QR code for you.
