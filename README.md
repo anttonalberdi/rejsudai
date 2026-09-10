@@ -7,7 +7,7 @@
 Drop the receipts in, name the settlement, press go. Rejsudai reads every receipt,
 logs into indfak2 with your 2FA, creates the draft, matches each cost to the
 right card transaction, fills in the line items and uploads the documents — while
-you watch it happen in the window.
+you watch it happen in the app.
 
 No terminal. No setup beyond filling in your credentials once.
 
@@ -104,8 +104,16 @@ Browser shows which one it is using; if there isn't one, press **Download
 Chromium…** and it fetches its own copy. If you have ever used Playwright on this
 Mac, the browser already in its cache is reused and nothing is downloaded.
 
-Chromium runs **visible** by default so you can watch and step in if indfak2 asks
-something unexpected. Settings has a toggle to run it hidden.
+Chromium **stays off your screen**: the Browser pane already shows you
+everything it is doing, so there is no reason for a browser window to take over
+your desktop when a run starts. It is still a real window, parked out of sight
+rather than closed — it comes back, on the page that needs you, if the run stops
+to ask something that wants the page put right by hand. Settings has a toggle to
+run it hidden instead, with no window at all.
+
+(It is parked off the edge of the desktop rather than minimised to the Dock:
+macOS stops drawing a minimised window altogether, which freezes the Browser
+pane. Off screen, it behaves exactly like a window you can see.)
 
 ### Your projects: the Aliases tab
 
@@ -138,17 +146,43 @@ the list then shows it as **Running**.
 Rejsudai also lists any folder of receipts it finds sitting in your inbox as a
 pending settlement. Select some and press **Process** to file them in one batch.
 
+### What the status on a settlement means
+
+| | |
+|---|---|
+| **Queued** | Waiting to be filed. |
+| **Running** | Being filed into indfak2 now. |
+| **Ready** | Filed. The draft is complete in indfak2 and the approval is yours to press. |
+| **Submitted** | Sent for approval — the run pressed it for you, because *Submit for approval* was on. |
+| **Failed** | Something stopped it. The reason is on the **Details** tab. |
+| **Cancelled** | The run was stopped before this settlement finished. |
+
+The distinction worth knowing is **Ready** against **Submitted**: both mean the
+run did its job, but only one of them means indfak2 has been asked to approve
+anything. A *Ready* settlement is still sitting there waiting for you.
+
 ### Watching a run
 
-The **Browser** pane mirrors what the browser is doing, live — the same view
-whether the browser is hidden or on screen. **Expand** gives it the whole window.
+The right-hand pane has two tabs. **Browser** mirrors what the browser is doing,
+live — the same view whether Chromium is hidden or parked off screen. **Details**
+holds everything known about one settlement: what was filed, what the run asked
+you, and anything that went wrong.
+
+They swap themselves as the work moves. Starting a run brings up **Browser**,
+because that is the thing that is moving; clicking any settlement brings up its
+**Details**, because that is the thing you just asked about; and a batch that
+ends with a failure comes to rest on the failure, rather than leaving it behind
+a tab you have to think to press. Either tab can be picked by hand at any time.
+**Expand** gives whichever is showing the whole window.
 It is a mirror, not a browser: clicking it does nothing. Drag the divider between
 any two panes to resize them (double-click one to put it back, or focus it and
 use the arrow keys); the sizes are remembered between launches.
 
 Above the log, a status line names the step in progress — *Selecting the project
 alias*, *Searching the card transactions* — so a stall is
-visible while it is happening.
+visible while it is happening. *Waiting for your answer* means the run has
+stopped and put a question on screen; see [It asks before it gives
+up](#it-asks-before-it-gives-up).
 
 Each settlement ends with a status (queued / running / done / submitted /
 failed), the error if it failed, and buttons to open its output folder and its
@@ -184,8 +218,10 @@ wrong**, **which step it happened in**, **the evidence**, and **what to fix**.
   → Fix the alias on the settlement, or set the right default alias in Settings.
 ```
 
-- **Screenshot** on the card opens a picture of the page exactly as it was when
-  the run gave up — it is taken before the browser closes.
+- The four of them are on the settlement's **Details** tab — click the
+  settlement, or let a failed batch bring it up for you.
+- **Screenshot** opens a picture of the page exactly as it was when the run gave
+  up — it is taken before the browser closes.
 - **Technical details** reveals the underlying message, which is the thing to
   paste into a bug report.
 - Common causes get their own wording and fix: no network, a wrong password, a
@@ -195,20 +231,76 @@ wrong**, **which step it happened in**, **the evidence**, and **what to fix**.
   are recorded against it in the *Details* table, and everything else is still
   filed.
 
+### It asks before it gives up
+
+When something goes wrong, the run stops and asks — with Chromium still open on
+the page that went wrong, showing what it says went wrong.
+
+**A document that will not file** is offered three answers:
+
+- **Try this document again.** The browser window comes back on screen, on the
+  page that went wrong: put it right by hand — dismiss whatever indfak2 is complaining about, close a dialog that
+  should not be there — and then retry. This is the one that saves a whole
+  re-run.
+- **Skip it and carry on.** The document stays in the inbox for another day and
+  the rest of the folder is filed.
+- **Stop the run here.** Lines already filed stay in the draft; everything else
+  keeps for next time. A stopped run is never submitted, whatever the *Submit
+  for approval* toggle says — the settlement is incomplete by definition.
+
+**A failure that stops the whole run** — signing in, reading a document,
+planning the settlement, opening the draft — is asked about the same way. These
+used to end a run on the spot, which is a poor answer to a Claude call that was
+briefly rate-limited or a sign-in that needed one nudge:
+
+- **Try again.** Runs that step over. For a sign-in that means starting from the
+  login page; for a document, sending it to Claude again; for the draft, going
+  back to the drafts list — a draft the run already started is re-entered, never
+  duplicated.
+- **A way past it, where there is one.** *I have signed in myself — carry on*
+  uses the session you just signed into in the open browser window. *Leave this
+  document out* files the rest of the folder and notes the one that was left in
+  the manifest.
+- **Stop the run.** Reports the failure exactly as it always did.
+
+**An alias indfak2 will not take** is the one failure whose answer is neither a
+retry nor a fix on the page, so it is asked differently: the question lists the
+aliases from your library and files the draft under the one you pick. It counts
+for that run only — the settlement's own alias and the default in Settings are
+left as they were, so fix them there if the wrong one keeps coming up.
+
+Answer with the mouse, or with the number keys — each option is numbered, and
+the arrows move between them. If the window is behind something else when a
+question comes up, the app bounces in the Dock until you look at it: nothing is
+happening until you do.
+
+Afterwards, the settlement's *Details* tab lists every question the run asked
+and what was answered, and marks any document that took more than one try — a
+settlement somebody steered by hand says so, rather than reading like one the
+automation filed on its own. The same is in `manifest.json`, under
+`settlement.questions`.
+
+Nothing is lost by ignoring the window: after five minutes the question takes
+the safe answer on its own — skip the document and carry on, or, for a failure
+that stops the run, stop and report it, which is what it would have done anyway.
+So a queue left running overnight is never held up by a prompt nobody is looking
+at. Both the asking and the wait are under **Settings → When something goes wrong**
+— untick it and a run never stops to ask, exactly as before.
+
 Receipts that didn't make it stay in the inbox folder, so a re-run picks up where
 the last one stopped. A re-run also re-enters the existing draft rather than
 creating a second one.
 
 ## Removing a settlement
 
-**Remove** on a settlement row is the inverse of saving one: a settlement that
-has not been filed is only its folder of copied receipts, so removing it deletes
-that folder.
+The **bin** at the left-hand end of a settlement row is the inverse of saving
+one: a settlement that has not been filed is only its folder of copied receipts,
+so removing it deletes that folder.
 
 - It asks first, naming the settlement and how many receipts go with it.
 - The originals you dropped in are never touched — the inbox holds copies.
-- A settlement already filed stays listed for its result; its button says
-  **Remove from list** and only clears the row.
+- A settlement already filed stays listed for its result; there the bin only
+  clears the row. Hovering it says which of the two you are about to do.
 - Removing is blocked while a run is in progress.
 - **It removes nothing in indfak2.** A draft already created there has to be
   deleted in indfak2 itself.

@@ -23,6 +23,9 @@ class Runner extends EventEmitter {
     this.cancelled = false;
     this.submit = false;
     this.redactions = [];
+    // The question bot.js is currently waiting on, if any: { id, kind }. Only
+    // one can be outstanding, since the run is blocked until it is answered.
+    this.pendingAsk = null;
   }
 
   get busy() {
@@ -77,12 +80,18 @@ class Runner extends EventEmitter {
       CLAIMS_OUTPUT: settings.claimsOutput,
       EXPENSE_ALIAS: settings.expenseAlias,
       EXPENSE_ALIAS_OPTION: settings.expenseAliasOption,
+      // The whole alias library, so that an alias indfak2 rejects can be
+      // answered with one of the others instead of ending the run.
+      REJSUDAI_ALIASES: JSON.stringify(settings.aliases || []),
       EXPENSE_TYPE: settings.expenseType,
       EXPENSE_PURPOSE: settings.expensePurpose,
       CORPORATE_CARD: settings.corporateCard,
       // Added by the wrapper: structured events, GUI 2FA, headless toggle.
       REJSUDAI_GUI: '1',
       REJSUDAI_HEADLESS: settings.headless ? '1' : '0',
+      // Asking is only possible while the app is here to relay the question.
+      REJSUDAI_ASK: settings.askOnFailure === false ? '0' : '1',
+      REJSUDAI_ASK_TIMEOUT: String(settings.askTimeoutSeconds),
       REJSUDAI_SUBMIT: submit ? '1' : '0',
       PLAYWRIGHT_BROWSERS_PATH: browsersPath,
     };
@@ -115,6 +124,7 @@ class Runner extends EventEmitter {
   runOne(settlement) {
     this.current = settlement;
     this.manifestPath = null;
+    this.clearAsk();
     this.lastError = null;
     this.lastFailure = null;
     this.emit('settlement', { id: settlement.id, status: 'running' });
@@ -145,6 +155,9 @@ class Runner extends EventEmitter {
 
     child.on('close', code => {
       this.child = null;
+      // A child that died mid-question leaves a modal on screen with nothing
+      // behind it.
+      this.clearAsk();
       this.emit('frame-end', { settlementId: settlement.id });
       const cancelled = this.cancelled;
       const manifest = this.readManifest(this.manifestPath);
@@ -194,7 +207,8 @@ class Runner extends EventEmitter {
       }
       if (payload.event === 'manifest') this.manifestPath = payload.manifest;
       if (payload.event === 'error') this.lastFailure = payload;
-      if (payload.event === 'totp_request') this.emit('totp-request', { settlementId: settlement.id });
+      if (payload.event === 'ask') this.openAsk(payload, settlement);
+      if (payload.event === 'ask_close') this.closeAsk(payload.id);
       this.emit('progress', { settlementId: settlement.id, ...payload });
       return;
     }
@@ -213,17 +227,53 @@ class Runner extends EventEmitter {
     }
   }
 
-  // Feeds a 2FA code back to the waiting automation (only reached when no
-  // TOTP_SECRET is configured).
-  submitTotp(code) {
+  // bot.js has stopped and asked something. A 2FA request keeps its own event
+  // and its own modal — the shape of that question has nothing to do with the
+  // rest — and everything else goes to the generic prompt.
+  openAsk(payload, settlement) {
+    this.pendingAsk = { id: payload.id, kind: payload.kind };
+    const question = this.redactFailure(payload);
+    if (payload.kind === 'totp') this.emit('totp-request', { settlementId: settlement.id, id: payload.id });
+    else this.emit('ask', { settlementId: settlement.id, ...question });
+  }
+
+  // The question is over without an answer from here (it timed out inside
+  // bot.js, or the run ended): take the prompt off the screen.
+  closeAsk(id) {
+    if (id && this.pendingAsk && this.pendingAsk.id !== id) return;
+    this.clearAsk();
+  }
+
+  clearAsk() {
+    if (!this.pendingAsk) return;
+    const { id } = this.pendingAsk;
+    this.pendingAsk = null;
+    this.emit('ask-close', { id });
+  }
+
+  // Answers whatever bot.js is waiting on. The id travels with the answer so a
+  // reply that arrives after its question timed out is discarded rather than
+  // landing on the next one. `answer` of null means "no answer" — every
+  // question has a default for exactly that.
+  answerAsk(id, answer) {
     if (!this.child) return false;
-    this.child.stdin.write(`${code || 'CANCEL'}\n`);
+    const target = id || (this.pendingAsk && this.pendingAsk.id);
+    if (!target) return false;
+    this.child.stdin.write(`${JSON.stringify({ id: target, answer: answer === undefined ? null : answer })}\n`);
+    this.clearAsk();
     return true;
+  }
+
+  // Feeds a 2FA code back to the waiting automation (only reached when no
+  // TOTP_SECRET is configured). An empty code cancels the run, as before.
+  submitTotp(code) {
+    return this.answerAsk(this.pendingAsk && this.pendingAsk.id, code || null);
   }
 
   cancel() {
     this.cancelled = true;
     this.queue = [];
+    this.clearAsk();
     if (this.child) this.child.kill('SIGTERM');
   }
 }

@@ -114,6 +114,14 @@ body.is-resizing-y, body.is-resizing-y * { cursor: row-resize !important; }
   padding: 12px 14px 10px;
 }
 .head-actions { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+/* The stage pane's own tabs — the same shape as the titlebar's, a size down. */
+.panel-browser .panel-head { align-items: center; }
+.pane-tabs { display: flex; gap: 2px; background: var(--bg); padding: 2px; border-radius: 7px; }
+.pane-tab {
+  border: 0; background: transparent; color: var(--ink-soft);
+  padding: 3px 11px; border-radius: 5px; font: inherit; font-size: 12px; font-weight: 500; cursor: pointer;
+}
+.pane-tab.is-active { background: var(--panel); color: var(--ink); box-shadow: 0 1px 2px rgba(0, 0, 0, .1); }
 
 /* ---------- buttons ---------- */
 .btn {
@@ -139,9 +147,31 @@ body.is-resizing-y, body.is-resizing-y * { cursor: row-resize !important; }
   background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
   padding: 10px 12px; margin-bottom: 7px;
 }
+.settlement { cursor: pointer; }
+.settlement:hover { border-color: var(--ink-soft); }
 .settlement.is-running { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent); }
 .settlement.is-error { border-color: var(--err); }
 .settlement.is-done, .settlement.is-submitted { opacity: .82; }
+/* The one whose details are on show. Opacity goes back to full: a finished
+   settlement you are reading is not a finished settlement you are ignoring. */
+.settlement.is-active { border-color: var(--accent); opacity: 1; }
+/* Selecting a failed card must not paint over the fact that it failed. */
+.settlement.is-error.is-active {
+  border-color: var(--err); box-shadow: 0 0 0 2px color-mix(in srgb, var(--err) 18%, transparent);
+}
+.settlement:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* Deleting a settlement is a bin at the leading edge of its card. Quiet until
+   the pointer is on it — it is destructive, so it should be deliberate. */
+.settlement-del {
+  flex: 0 0 auto; display: flex; align-items: center; justify-content: center;
+  width: 24px; height: 24px; margin: -2px 0 0 -3px; padding: 0;
+  border: 0; border-radius: 6px; background: transparent;
+  color: var(--ink-soft); cursor: pointer;
+}
+.settlement-del:hover:not(:disabled) { color: var(--err); background: color-mix(in srgb, var(--err) 12%, transparent); }
+.settlement-del:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.settlement-del:disabled { opacity: .35; cursor: default; }
+.settlement-del.is-busy { opacity: .5; }
 .settlement-main { flex: 1; min-width: 0; }
 .settlement-name { font-weight: 600; }
 .settlement-meta { color: var(--ink-soft); font-size: 11.5px; margin-top: 2px; word-break: break-all; }
@@ -202,6 +232,24 @@ td .btn { margin-top: 5px; padding: 2px 8px; font-size: 11px; }
   color: var(--ink-soft); font-size: 11.5px;
 }
 
+/* ---------- details ---------- */
+/* Shares the stage with the live browser: same box, same border, scrolls on
+   its own so a long document table cannot push the panel out of shape. */
+.details-stage {
+  flex: 1; min-height: 0; display: flex; flex-direction: column;
+  background: var(--panel); border-top: 1px solid var(--line);
+}
+.details-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 10px 14px 8px; border-bottom: 1px solid var(--line);
+}
+.details-head h3 { margin: 0; font-size: 13px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.details-head .btn { padding: 3px 9px; font-size: 11.5px; }
+.details-body { flex: 1; min-height: 0; overflow-y: auto; padding: 10px 14px 14px; font-size: 12px; }
+.details-idle { margin: 0; color: var(--ink-soft); font-size: 11.5px; max-width: 380px; }
+/* On the card the failure was a note in a corner; here it is the headline. */
+.details-body .failure { margin-top: 0; margin-bottom: 10px; }
+
 /* ---------- settings ---------- */
 #view-settings, #view-aliases { overflow: hidden; }
 .settings-scroll { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 14px; max-width: 780px; width: 100%; margin: 0 auto; }
@@ -211,7 +259,7 @@ td .btn { margin-top: 5px; padding: 2px 8px; font-size: 11px; }
 .field { margin-bottom: 12px; }
 .field label { display: block; font-weight: 500; margin-bottom: 4px; }
 .field-row { display: flex; gap: 7px; align-items: center; }
-input[type="text"], input[type="password"], textarea {
+input[type="text"], input[type="password"], input[type="number"], textarea {
   flex: 1; width: 100%; font: inherit; color: var(--ink); background: var(--bg);
   border: 1px solid var(--line); border-radius: 7px; padding: 6px 9px;
 }
@@ -259,19 +307,49 @@ input.alias-code { flex: 0 0 132px; }
 .badge-live { border-color: var(--ok); color: var(--ok); }
 
 /* ---------- modals ---------- */
-.modal { position: fixed; inset: 0; background: rgba(0,0,0,.42); display: flex; align-items: center; justify-content: center; padding: 24px; }
+/* Above the splitters (z-index 2), which would otherwise draw a strip across
+   the dialog and swallow clicks that land on it. */
+.modal { position: fixed; inset: 0; z-index: 10; background: rgba(0,0,0,.42); display: flex; align-items: center; justify-content: center; padding: 24px; }
 .modal[hidden] { display: none; }
 .modal-box { background: var(--panel); border-radius: 12px; padding: 18px 20px; width: 380px; max-width: 100%; box-shadow: 0 16px 46px rgba(0,0,0,.32); }
 .modal-wide { width: 560px; }
 .modal-box p { margin: 0 0 12px; font-size: 12px; }
 .modal-box input { width: 100%; font-size: 20px; letter-spacing: .16em; text-align: center; padding: 9px; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+/* ---------- the run's question ---------- */
+.field-inline { display: flex; align-items: center; gap: 8px; }
+.field-inline label { margin-bottom: 0; white-space: nowrap; }
+.field-inline input[type="number"] { width: 84px; flex: 0 0 auto; }
+#ask-question { margin-bottom: 6px; }
+.ask-raw {
+  margin: 10px 0 0; padding: 7px 8px; border-radius: 5px;
+  background: var(--log-bg); color: var(--log-ink); border: 1px solid var(--line);
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  font-size: 11px; line-height: 1.45; white-space: pre-wrap;
+  max-height: 116px; overflow-y: auto; user-select: text;
+}
+/* An alias question offers one option per alias in the library, so this list is
+   no longer three buttons long by definition — it scrolls rather than pushing
+   the countdown off the bottom of the screen. */
+.ask-options { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; max-height: 46vh; overflow-y: auto; }
+.ask-option { display: flex; align-items: flex-start; gap: 10px; width: 100%; text-align: left; padding: 9px 12px; }
+/* The number that answers this option from the keyboard. */
+.ask-option-key {
+  flex: 0 0 auto; margin-top: 1px; padding: 0 5px; border: 1px solid currentColor;
+  border-radius: 4px; font-size: 10.5px; font-weight: 600; line-height: 15px; opacity: .55;
+}
+.ask-option-text { flex: 1; min-width: 0; }
+.ask-option-label { display: block; font-weight: 600; }
+.ask-option-detail { display: block; margin-top: 2px; font-size: 11.5px; font-weight: 400; opacity: .82; }
+.ask-foot { display: flex; align-items: center; gap: 10px; margin-top: 14px; min-height: 26px; }
+.ask-foot .subtle { font-size: 11.5px; }
+#ask-countdown { margin-left: auto; }
+
 .steps { margin: 0 0 12px; padding-left: 20px; font-size: 12px; }
 .steps li { margin-bottom: 6px; }
-.result-body { max-height: 52vh; overflow-y: auto; font-size: 12px; }
-.result-body table { width: 100%; border-collapse: collapse; margin-top: 8px; }
-.result-body th, .result-body td { text-align: left; padding: 5px 7px; border-bottom: 1px solid var(--line); vertical-align: top; }
-.result-body th { color: var(--ink-soft); font-weight: 500; white-space: nowrap; }
+.details-body table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+.details-body th, .details-body td { text-align: left; padding: 5px 7px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.details-body th { color: var(--ink-soft); font-weight: 500; white-space: nowrap; }
 .result-row-err td { color: var(--err); }
 .tallies { display: flex; gap: 16px; margin: 6px 0 2px; }
 .tally-n { font-size: 19px; font-weight: 600; display: block; }

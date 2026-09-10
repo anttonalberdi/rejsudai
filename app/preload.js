@@ -42,6 +42,7 @@ contextBridge.exposeInMainWorld('rejsudai', {
     cancel: () => ipcRenderer.invoke('run:cancel'),
     state: () => ipcRenderer.invoke('run:state'),
     submitTotp: code => ipcRenderer.invoke('run:totp', code),
+    answer: (id, answer) => ipcRenderer.invoke('run:answer', { id, answer }),
   },
   browser: {
     status: () => ipcRenderer.invoke('browser:status'),
@@ -61,6 +62,8 @@ contextBridge.exposeInMainWorld('rejsudai', {
   onSettlement: fn => on('run:settlement', fn),
   onRunState: fn => on('run:state', fn),
   onTotpRequest: fn => on('run:totp-request', fn),
+  onAsk: fn => on('run:ask', fn),
+  onAskClose: fn => on('run:ask-close', fn),
   onBrowserProgress: fn => on('browser:progress', fn),
   onFrame: fn => on('run:frame', fn),
   onFrameEnd: fn => on('run:frame-end', fn),

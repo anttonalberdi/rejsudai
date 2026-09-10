@@ -24,6 +24,103 @@ _Nothing yet._
 
 ---
 
+## [1.0.2] — 2026-09-10
+
+_A run that hits trouble now asks instead of ending, and the right-hand pane
+grows a Details tab to say what happened._
+
+### Added
+
+- **A run asks before it gives up.** When something goes wrong, the run stops
+  with Chromium still open on the page that went wrong and offers a way forward
+  instead of ending there.
+  - **A document that will not file**: try it again (after putting the page
+    right by hand), skip it, or stop the run. Previously the error was recorded
+    and the document skipped, which meant a whole re-run for a problem that
+    often takes one click to fix.
+  - **A failure that used to end the run on the spot** — signing in, reading a
+    document, planning the settlement, opening the draft — is now asked about
+    too: try that step again, take the way past it where there is one (*I have
+    signed in myself — carry on*, *leave this document out*), or stop and have
+    it reported exactly as before. A briefly rate-limited Claude call or a
+    sign-in that needed one nudge no longer costs the whole run.
+  - The screenshot on a failure report is now taken at the moment things broke
+    rather than when the run ends, so it shows the failure and not the state of
+    the page after someone has been putting it right.
+  - Questions can be answered from the keyboard (each option is numbered), and
+    the app bounces in the Dock while one is waiting, so a run does not sit
+    blocked behind another window.
+  - *Details* and `manifest.json` now record every question the run asked and
+    what was answered, and mark any document that took more than one try. A 2FA
+    code is never written to either.
+  - A stopped run records every document it never reached, so the manifest is
+    honest about them and the submit gate sees an incomplete settlement — a
+    stopped run can never be sent for approval.
+  - A question nobody answers takes the safe option (skip, and on with the run)
+    after five minutes, so a queue is never held up by a window nobody is
+    looking at. Both the asking and the wait are under **Settings → When a
+    document will not file**; turned off, a run behaves exactly as it did
+    before.
+  - **An alias indfak2 will not take** is now a question with the answer in
+    it: every alias from Settings is offered as a choice, and the one picked
+    fills the draft in place of the one that failed (for that run — Settings is
+    left alone). A mistyped alias code used to leave *try the same thing again*
+    and *stop* as the only ways forward.
+  - The 2FA prompt now rides the same channel. Answers carry the id of the
+    question they belong to, so a reply that arrives after its question timed
+    out can no longer land on the next one.
+
+### Changed
+
+- **A finished settlement says whether it is Ready or Submitted**, instead of
+  both reading *Done*. *Ready* means the draft is complete in indfak2 and the
+  approval is yours to press; *Submitted* means the run pressed it. The two were
+  the same word for the one thing worth knowing at the end of a run.
+- **The right-hand pane is two tabs: Browser and Details.** The details of a
+  settlement — what was filed, what the run asked, what went wrong — used to be
+  a modal you opened from a button on the card, and a failure was a block of red
+  text on the card itself. Both now live in the pane, which has room for them.
+  Starting a run brings up *Browser*; clicking a settlement brings up its
+  *Details*; a batch that ends in a failure comes to rest on that failure.
+- **A settlement is removed with the bin at the left-hand end of its row**,
+  rather than a *Remove* button among the actions. The confirmation, and what it
+  deletes, are unchanged.
+- **Chromium stays off your screen** instead of taking over the desktop when a
+  run begins. The Browser pane already mirrors the page, so the window was only
+  ever in the way — and it is still a real window, parked out of sight rather
+  than closed: it comes back, on the page that needs you, when the run stops to
+  ask something that wants the page put right by hand. It is parked off the edge
+  of the desktop rather than minimised to the Dock, because macOS stops drawing
+  a minimised window, which freezes the Browser pane. Running Chromium hidden
+  altogether is still a Settings toggle, and a `node bot.js` run from a terminal
+  is unchanged — with no Browser pane to fall back on, the window stays where it
+  was.
+
+### Fixed
+
+- **A wrong alias was reported as a slow Expense module.** Answering *Try the
+  draft again* re-ran that stage from its first step — clicking the portal's
+  "Expense" button — which is not something that can be done from inside the
+  module, where the failed attempt had left the page. It timed out there, and
+  that timeout replaced the real cause in the report. The step now goes back to
+  the drafts list through the module's own navigation when the module is
+  already open.
+- **A retry that fails somewhere else no longer buries what went wrong first.**
+  The failure that started a stage is what gets reported, with whatever the
+  retry ran into kept alongside it.
+- Modals are drawn above the pane splitters. A splitter used to paint a strip
+  across the middle of a dialog and swallow clicks that landed on it.
+- The receipts inbox is created when it isn't there, instead of the settlement
+  list showing a permanent "Inbox folder not found — set it in Settings"
+  warning. Settings has had no inbox field since settlements are composed in the
+  app, so no path could clear that warning; the inbox is the app's own working
+  folder now, and only a path that genuinely cannot be created or read is
+  reported, with the reason.
+- The wordmark in the top bar read *REJSUDAIai* — the last syllable was in the
+  mark twice, once in the name and once in the italic ending it borrows from.
+
+---
+
 ## [1.0.1] — 2026-09-10
 
 _Fixes the first-run Chromium download, which was broken in both 1.0.0 `.dmg`s._
@@ -192,5 +289,6 @@ history is in the git log, from the initial commit through
 That CLI still works — see [`DEVELOPING.md`](DEVELOPING.md).
 
 <!-- Add one link per release as it is tagged. -->
+[1.0.2]: https://github.com/anttonalberdi/rejsudai/releases/tag/v1.0.2
 [1.0.1]: https://github.com/anttonalberdi/rejsudai/releases/tag/v1.0.1
 [1.0.0]: https://github.com/anttonalberdi/rejsudai/releases/tag/v1.0.0

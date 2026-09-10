@@ -74,12 +74,25 @@ function isSettlementFolder(folderPath) {
   return entries.includes(META_FILE) || entries.some(f => DOC_RE.test(f));
 }
 
+// The inbox is the app's own working folder, not a path the user points at —
+// Settings has no field for it, because settlements are composed in the app and
+// written here. So a missing one is just a fresh install (or a folder someone
+// tidied away): create it and carry on. Only a path that cannot be created or
+// read — a removed volume, a permission problem — is reported as a failure.
 function scan(inboxPath) {
   let entries;
   try {
     entries = fs.readdirSync(inboxPath, { withFileTypes: true });
   } catch (err) {
-    return { inbox: inboxPath, exists: false, error: err.message, settlements: [] };
+    if (err.code !== 'ENOENT') {
+      return { inbox: inboxPath, exists: false, error: err.message, settlements: [] };
+    }
+    try {
+      fs.mkdirSync(inboxPath, { recursive: true });
+      entries = fs.readdirSync(inboxPath, { withFileTypes: true });
+    } catch (createErr) {
+      return { inbox: inboxPath, exists: false, error: createErr.message, settlements: [] };
+    }
   }
   const settlements = entries
     .filter(e => e.isDirectory() && !e.name.startsWith('.'))

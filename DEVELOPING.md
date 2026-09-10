@@ -167,10 +167,13 @@ CLI behaviour is unchanged. They are marked with comments in the source:
 | Change | Why |
 |---|---|
 | `rejsudaiEmit()` helper | Writes one-line `@@REJSUDAI {json}` progress events to stdout so the app can show progress and locate the manifest without screen-scraping prose. Emits nothing when `REJSUDAI_GUI` is unset. |
-| `rejsudaiAskGuiForOTP()` in `getOTP()` | The old `readline` fallback prompted on a terminal that a windowed app does not have, and would hang forever. Under the GUI it asks the app for a code and reads it from stdin instead. The terminal prompt is kept for CLI runs. |
+| `askUser()` / `askForOTP()` in `getOTP()` | The old `readline` fallback prompted on a terminal that a windowed app does not have, and would hang forever. Questions now go out as a `@@REJSUDAI ask` event and answers come back on stdin; the CLI is asked on stderr and read from the same reader. |
+| `askAfterExpenseFailure()` in the expense loop | A document that cannot be filed used to be recorded and skipped. It now asks — retry (after the page is put right by hand), skip, or stop — with the browser still open on the problem. Every question carries the answer it takes on its own, so with `REJSUDAI_ASK=0` (or the question unanswered) the run behaves exactly as it did before. |
+| `runStage()` around signing in, reading a document, planning, and the draft | The failures that used to end a run outright. Each stage is safe to attempt again on its own, so it asks instead: try again, take the way past it (*I have signed in myself — carry on*, *leave this document out*), or stop — where stopping rethrows the original error into the same handler as before. |
 | `headless: process.env.REJSUDAI_HEADLESS === '1'` | Backs the Settings toggle. With the variable unset this is `false` — identical to the original hardcoded value. |
 | `SUBMIT_SETTLEMENT` + `submitSettlement()` | Backs the *Submit for approval* toggle (`REJSUDAI_SUBMIT=1`), and `--submit` on the CLI. Unset, the run ends on a draft exactly as before. |
 | `setStep()` / `describeFailure()` / `reportFailure()` | A Playwright abort reads `locator.waitFor: Timeout 10000ms exceeded` and names only a selector, which tells the user nothing. Each stage of the run now declares what it is doing, and a failure is reported as cause + step + evidence + fix — as a `@@REJSUDAI error` event for the app, and as a printed block on the CLI. |
+| `rejsudaiStowWindow()` after `browser.newPage()` | Moves the Chromium window off the bottom of the desktop as soon as it exists — the app mirrors the page in the Browser pane, so the window is a fallback for working the page by hand, not the view. `--no-startup-window` means no window exists until `newPage()`, so it is on screen for about 35 ms. **Not minimised:** a minimised window on macOS stops compositing, and measured against a normal window it kills the screencast outright (0 frames vs 41 over 4 s, and it does not recover when the window is restored), makes `page.screenshot()` block until it times out, and slows actionability waits (2.0 s vs 0.6 s for a click on an animating element). Parked off screen everything measures the same as on screen. macOS clamps how far a window may travel, so the landing position is checked against the display's height and put back if it would leave a strip visible. `askAboutFailure()` restores it — position and focus — before any question, since half those answers want hands on the page. Returns `null` on a CLI run (no mirror to fall back on) and when headless (no window). |
 | `rejsudaiStartScreencast()` after `browser.newPage()` | Feeds the Browser pane. Requires `app/lib/screencast.js` lazily and only when the app spawned the process (`process.send` exists), so a CLI run neither loads it nor pays for it. Failures are logged and ignored — a dead preview must not fail a settlement. |
 
 Beyond the optional submit step at the very end of a run, no control flow in the
@@ -186,6 +189,19 @@ environment-level causes (network, credentials, Claude billing, missing
 Chromium, full disk) before falling back to a step-aware timeout sentence, and
 `reportFailure()` screenshots the live page before the browser closes. `CLAUDE.md`
 covers the chain in full; the user-facing half is in the README.
+
+### How a question is asked
+
+Questions ride the channel the 2FA prompt has always used, generalized: a
+`@@REJSUDAI ask` event out on stdout, a `{"id":…,"answer":…}` line back on
+stdin. Ids are what keep a late answer from landing on the next question, and
+every question carries a `fallback` — the answer the run takes on its own when
+nobody replies, which must be what it would have done before it could ask. On
+the app side `runner.js` holds one `pendingAsk`, routes `kind: 'totp'` to the
+existing 2FA modal and everything else to the generic one in `index.html`,
+redacts every string in it, and clears it whenever the run ends — a modal must
+never outlive the question behind it. `CLAUDE.md` has the rest, including why
+stdin is `unref()`ed between questions.
 
 ## Layout
 
@@ -210,6 +226,24 @@ build/                                      icon + hardened-runtime entitlements
 The renderer runs with `contextIsolation: true` and `nodeIntegration: false`; it
 has no filesystem or child-process access and cannot read a credential value —
 only whether one is set and where it came from.
+
+### The stage pane
+
+The right-hand column is the stage pane above the log. The stage holds two
+tabpanels — `#pane-browser` (the screencast frames) and `#pane-details` (one
+settlement's manifest, questions and failure) — switched by `showPane()`.
+`detailsFor` holds the id of the settlement on show and `renderDetails()` reads
+it back out of `items` rather than closing over a settlement, so it can be
+called from the tail of `render()` and stay right as the run moves underneath
+it. The pane switches itself in three places: `setRunning()` on the rising edge
+of a batch (to Browser), `openDetails()` from a click on a card, and
+`setRunning()` on the falling edge when a settlement failed (to that failure).
+Everything else leaves it where the user put it.
+
+The section still carries the class `panel-browser`, and its splitter still
+saves as `layout.browserPct` — the pane grew a second tab rather than becoming
+a different pane, and renaming them would orphan the saved layout of every
+existing install.
 
 ## Theming internals
 

@@ -6,10 +6,11 @@
 > Everything below still describes `bot.js` itself, which is unchanged as an
 > automation and still runs standalone as `node bot.js <folder>`. The only edits
 > made for the app — a `@@REJSUDAI` progress emitter, a GUI 2FA prompt replacing
-> the terminal `readline` fallback, a `REJSUDAI_HEADLESS` toggle, and a CDP
+> the terminal `readline` fallback, a `REJSUDAI_HEADLESS` toggle, a CDP
 > screencast (`app/lib/screencast.js`) that mirrors the page into the app's
-> Browser pane — are inert unless `REJSUDAI_GUI=1` is set, and are marked with
-> comments in the source.
+> Browser pane, and `rejsudaiStowWindow()`, which parks the Chromium window off
+> screen behind that mirror — are inert unless `REJSUDAI_GUI=1` is set, and are
+> marked with comments in the source.
 
 
 Playwright + Claude API automation that logs into **indfak2.dk** (KU's indfak2 expense system), creates expense report drafts, matches card transactions, and attaches invoice PDFs.
@@ -65,12 +66,15 @@ node bot.js <settlement_folder>
   - `settlement` — draft name, settlement number, alias, type, purpose,
     `form_fields_entered` (label → value snapshot read back from the draft form),
     save errors, counts split into `expenses_card` / `expenses_normal_cost` /
-    `expenses_unprocessed`, status
+    `expenses_unprocessed`, `questions` (every question the run asked and what
+    was answered — a 2FA code is recorded as `(code supplied)` and never
+    verbatim), status
   - `invoices[]` — per expense: `role` + `plan_reason` (from the settlement plan),
     `expense_type` (`"From Card Transaction"` or `"Normal Cost"`), `parsed_invoice`
     (vendor/amount/currency/date/document_kind/payment_method from Claude),
     `matched`, `transaction_row` (full text of the selected grid row),
-    `fields_entered` (line-dialog snapshot + attachment names), `errors`,
+    `fields_entered` (line-dialog snapshot + attachment names), `attempts` (how
+    many tries it took — more than one means somebody retried it), `errors`,
     `moved_to_output`
   - `supporting_documents[]` — per supporting file: `attached_to` (which expense
     line it was uploaded to), `moved_to_output`
@@ -155,6 +159,10 @@ Key behaviors this enables:
   its path recorded in the manifest so the app can open it), claimed supporting
   docs are returned to the pending pool, and processing continues. Files already in the draft from
   a crashed run should be removed from the inbox folder by hand before re-running.
+- **A failing document asks before it is given up on** — the browser is still
+  open on the page that failed, so *retry* (after putting the page right by
+  hand), *skip* and *stop* are all offered. See "Asking instead of giving up".
+  Unattended, and with asking turned off, it skips: the behaviour above.
 - Processing order: card/unknown expenses first, pocket expenses last — an
   unmatched card search leaves the allocation dialog open for reuse, and the
   normal-cost flow closes it (`closeAllocationDialogIfOpen`, Cancel button, never
@@ -194,25 +202,34 @@ clicking Delete unless the selected-row count exactly matches the rows found.
 | `EXPENSE_PURPOSE` | `2 - Outside Denmark` | Dropdown partial match for Purpose field (non-travel; trips derive it from the destination) |
 | `CORPORATE_CARD` | `SEB Eurocard (a Mastercard, issued by SEB)` | Card description used by the settlement plan to tell corporate-card receipts from out-of-pocket ones |
 | `REJSUDAI_SUBMIT` | unset (draft) | `1` sends a cleanly filed settlement for approval; same as `--submit` |
+| `REJSUDAI_ALIASES` | unset (set by the app) | JSON `[{name, code}]` — the app's alias library, offered as choices when indfak2 rejects an alias. A CLI run without it gets only retry/stop |
+| `REJSUDAI_ASK` | unset (ask when there is someone to ask) | `0` never stops to ask — a document that cannot be filed is skipped, as it always was; `1` forces asking. Unset means the app and a terminal ask, a piped run does not |
+| `REJSUDAI_ASK_TIMEOUT` | `300` | Seconds a question waits before taking its default; `0` waits indefinitely |
 
 ## Architecture
 
 ```
+(Stages marked ✻ are wrapped in `runStage`: on failure they ask rather than
+end the run — try again, take the way past, or stop.)
+
 run()
- ├─ login(page)                          TOTP + credentials
+ ├─ login(page)                       ✻  TOTP + credentials
  ├─ runFolder(page, folderPath)
  │   ├─ readSettlementMeta()             alias + settlement name (.rejsudai.json,
  │   │                                    falling back to the folder name)
  │   ├─ prepareFile() × N               HEIC → JPEG (tmp dir, cleaned up after)
- │   ├─ parseInvoice() × N              Claude vision → {document_kind, vendor, date,
+ │   ├─ parseInvoice() × N           ✻  Claude vision → {document_kind, vendor, date,
  │   │                                    amount, currency, payment_method, references, keywords}
- │   ├─ planSettlement(docs)             Claude → role per file (card_expense /
+ │   ├─ planSettlement(docs)          ✻  Claude → role per file (card_expense /
  │   │                                    pocket_expense / unknown_expense / supporting)
  │   │                                    + trip_start / trip_end travel window
- │   ├─ openExpenseModule(page)          → {outer, inner}  (two nested iframes)
+ │   ├─ openExpenseModule(page)       ✻  → {outer, inner}  (two nested iframes)
+ │   │                                    (module + draft are one stage)
  │   ├─ reuse existing draft by name, or
- │   ├─ fillNewDraft(page, inner, …)    name / type / alias / departure / arrival /
- │   │                                    purpose; two-save pattern
+ │   ├─ fillNewDraft(page, inner, …)    name / type / alias (selectAlias — asks
+ │   │                                    for another one if indfak2 rejects it) /
+ │   │                                    departure / arrival / purpose;
+ │   │                                    two-save pattern
  │   ├─ readSettlementNumber(inner)      reads disabled/readonly numeric input
  │   └─ loop over expenses (card/unknown first, pocket last):
  │       ├─ findMatchingTransaction      card + unknown: returns matched row(s)
@@ -221,7 +238,9 @@ run()
  │       │                                docs as extra attachments on the first
  │       ├─ createNormalCostLine         pocket, or unknown with no match → "Normal Cost"
  │       │                                (date/amount/currency/cost type/means of payment)
- │       └─ saveLineAndVerify            every line save verified (form must close)
+ │       ├─ saveLineAndVerify            every line save verified (form must close)
+ │       └─ askAfterExpenseFailure     on failure: retry / skip / stop, with the
+ │                                      browser still open on the problem
  │   ├─ submitSettlement()            only with --submit/REJSUDAI_SUBMIT=1, and only
  │   │                                    when nothing was left unfiled; verified by
  │   │                                    re-reading the drafts list
@@ -271,13 +290,120 @@ translated before it leaves `bot.js`:
   browser exists.
 - Per-document failures inside the expense loop use the same translation: the
   manifest gets `errors: [title]` plus `error_detail` (`while` / `detail` /
-  `hint` / `screenshot` / `raw`), and the run continues.
+  `hint` / `screenshot` / `raw`), and the run continues — after asking what to
+  do with it (below).
 - App side: `runner.js` keeps the last `error` event as `this.lastFailure`,
   redacts every string in it, and sends it on the `settlement` event as
   `failure` (with `error` set to its title for the old shape). The renderer's
   `failureBlock()` draws cause → step → detail → hint, plus *Screenshot* and
-  *Technical details* buttons. `"Bot failed: <msg>"` is still parsed as the
+  *Technical details* buttons, into the **Details** tab of the stage pane — the
+  card carries only the red border and the `Failed` chip, and a batch that ends
+  with a failure opens that settlement's Details on its own. `"Bot failed: <msg>"` is still parsed as the
   fallback for a crash that never reached `reportFailure`.
+
+## Asking instead of giving up
+
+A document that could not be filed used to end one way: the error went into the
+manifest and the run moved on. It now asks first, because the browser is still
+open on the page that failed and the useful answers are all the user's to give.
+
+- **`askUser({ kind, question, detail, context, options, fallback, required, timeoutMs })`**
+  is the channel. Under the app the question goes out as a `@@REJSUDAI ask`
+  event and the answer comes back on **stdin** as `{"id":…,"answer":…}`; on the
+  CLI the question is printed to stderr and the reply read from the same place.
+  There is exactly one stdin reader (`openAnswerChannel`) — two would each eat
+  half the answers, which is why the 2FA prompt was folded into this and no
+  longer runs its own `readline`.
+- **Every question carries an id.** An answer for a question that has already
+  timed out is dropped rather than delivered to the next one.
+- **Every question carries a `fallback`**: what the run would have done on its
+  own. It is taken when asking is off, when the reply is empty, and when the
+  timeout passes unanswered — so turning asking off changes nothing about how a
+  run behaves. A `fallback` that is not the old behaviour is a bug.
+- **`required: true`** (the 2FA code) is asked even where questions are turned
+  off, including a piped CLI run: there is no fallback that gets past it.
+- **stdin is `unref()`ed except while a question is outstanding.** A resumed
+  stdin holds the event loop open, which would leave the process running after
+  the last settlement and stall the app's queue.
+- **`askAfterExpenseFailure()`** is the one caller in the expense loop:
+  - `retry` — the attempt loop runs the document again, after the user has put
+    the page right in the browser by hand.
+  - `skip` — the `fallback`: recorded in the manifest, file left in the inbox.
+  - `stop` — every remaining document is recorded as `Not attempted`, which
+    keeps the manifest honest and leaves the **submit gate** looking at an
+    incomplete settlement, so a stopped run can never send one.
+  - A **closed page rethrows instead of asking** — a dead browser cannot be
+    fixed on the page, and a retry would only ask the same question again.
+- App side: `runner.js` holds the outstanding question as `pendingAsk`, routes
+  `kind: 'totp'` to the existing 2FA modal and everything else to the generic
+  one, redacts every string in it (a question can carry raw Playwright text),
+  and answers with `answerAsk(id, answer)`. It clears the prompt when the child
+  exits, when the run is cancelled, and on `ask_close` — a modal must never
+  outlive the question behind it.
+- **`askAboutAlias()`** is asked where the alias search fails, inside
+  `fillNewDraft` — a wrong alias is a configuration mistake whose fix is
+  another alias, not a page that needs a hand. It offers every alias in
+  `KNOWN_ALIASES` (the app's library, handed over as `REJSUDAI_ALIASES`), plus
+  *look for the same one again* and *stop*. The chosen alias is searched for by
+  code (never through `EXPENSE_ALIAS_OPTION`, which belongs to the alias the
+  run was configured with), applies to that run only, and is what the manifest
+  records as `settlement.alias`. Answering *stop* marks the error
+  `rejsudaiAsked` so the draft stage around it does not put a second, vaguer
+  question about the same failure.
+- **`runStage(page, { question, retry, retryDetail, extra }, fn)`** does the
+  same for the stages that used to end the run outright: signing in, reading a
+  document, planning, and opening the module + getting a draft (in both folder
+  and single-file mode). Each is safe to attempt again on its own — `login()`
+  starts from the login page, the Claude calls are pure, and the draft stage
+  re-enters a draft it half-created by name, which is the crash-resume path a
+  re-run takes anyway, rather than duplicating it.
+  - `extra` is the caller's own way past the failure, returned as the
+    `STAGE_SKIPPED` sentinel: *I have signed in myself — carry on* (use the
+    session in the open window and skip `login()`), and *leave this document
+    out* at the reading stage.
+  - `CAN_WORK_THE_PAGE` (`REJSUDAI_HEADLESS !== '1'`) gates the answers that
+    need a window to work in — signing in by hand, putting a page right before a
+    retry. With Chromium hidden they are not offered, and the answers that
+    remain are worded for it: the Browser pane is a mirror, not a browser.
+  - `fallback` is `'stop'`, which rethrows the original error to the run's own
+    handler — so an unattended run, or one with asking turned off, ends exactly
+    where it did before.
+  - A document left out at the reading stage is recorded in the manifest
+    (`Could not be read — left out of the settlement`) and counts as unfiled,
+    so it blocks the submit gate like any other missing document.
+- **The window comes back before a question is asked.** Under the app Chromium
+  is parked off screen (`rejsudaiStowWindow()`), because the Browser pane is the
+  view; but the first answer to most of these questions is *put the page right
+  and retry*, so `askAboutFailure()` restores its position and focus before
+  every one of them, and leaves it on screen — a run that has needed a person
+  has stopped being a background job. Off screen is not hidden:
+  `CAN_WORK_THE_PAGE` still holds. **Do not "improve" this to a minimised
+  window** — a minimised window on macOS stops compositing, which takes the
+  screencast (0 frames, and it stays dead after the window is restored),
+  `page.screenshot()` (blocks until it times out) and Playwright's actionability
+  waits with it.
+  - **A retry that fails elsewhere does not overwrite the first cause.** The
+    stage keeps the first attempt's `describeFailure()` result and, when it
+    finally gives up on a different failure, reports the original title, hint
+    and screenshot with *"Trying again stopped elsewhere: …"* appended to the
+    detail. The first failure is the one that has to be fixed; the second is
+    usually just the page being somewhere else by then.
+- **The screenshot is taken when the stage breaks**, kept on the error as
+  `err.rejsudaiScreenshot`, and preferred by `reportFailure` over a fresh one. A
+  shot taken after someone has spent two minutes putting the page right is a
+  picture of the repair, not of the failure.
+- **Every question is on the record.** `ASK_LOG` collects `{ at, kind,
+  question, answer, label, answered }` for each one and goes into the manifest
+  as `settlement.questions`; `answered: false` marks one that timed out into its
+  default. The answer is logged to stdout too, so the log a user copies into a
+  bug report shows what they were asked and what they chose. A 2FA code is the
+  one answer never recorded verbatim — it is stored as `(code supplied)`.
+  Per-document `attempts` counts the tries, so a line that only went in on the
+  third go does not read like one that went in first time. The app shows both in
+  the result view.
+- What is still outside all this: the manifest write and the file moves at the
+  end of a run, and `submitSettlement`, which records its own errors instead of
+  throwing.
 
 ## iframe structure
 
@@ -333,6 +459,17 @@ is inferred from the component values (>12 ⇒ that slot is the day); the
 current value may be a prefill other than today (e.g. the trip departure), so
 "doesn't read as today" must never flip the order to day-first.
 
+### `openExpenseModule` has to survive a second call
+The draft stage is retried from the top, so the module step runs again from
+wherever the last attempt broke — usually *inside* the module, on a half-filled
+draft form, where the portal's top-level `Expense` button is no use (gone, or
+matching three elements once the send wizard has run). Waiting for it there
+times out, and since `CURRENT_STEP` is `expense_module` by then, that timeout is
+what gets reported — burying the real failure. So the step tries the outer
+frame's `#ecm_link` first when it is already in the DOM (the same door
+`submitSettlement` uses to get back to the drafts list) and only clicks the
+`Expense` button when that is not available.
+
 ### `.stretch` is not a dialog marker
 `#inner-draft-container` and other page containers also carry
 `.ng-scope.ng-isolate-scope.stretch`. Detect the open allocation page via the
@@ -378,3 +515,7 @@ Both API calls use `cache_control: { type: "ephemeral" }`:
 | Line logged "Allocated" but missing from the draft | Save click swallowed / validation banner not detected (pre-`saveLineAndVerify`) | Fixed: saves are verified (form must close); failures recorded in manifest `errors`, file kept in inbox |
 | "Reusing open allocation dialog" then empty-grid no-match on a valid transaction | `.stretch` false-positive dialog detection | Fixed: `allocationPageOpen()` checks the " Allocate" button |
 | Invoice total spans several card transactions | Travel-account billing (one charge per ticket/fee) | Fixed: subset-sum match + one line per transaction, same invoice attached to each |
+| A failure is reported as a slow Expense module, but the run clearly got further than that | A retried stage re-entered `openExpenseModule` from inside the module | Fixed: the step re-enters via `#ecm_link`, and a stage now reports the failure that started it rather than the one its retry hit |
+| An alias is wrong and the only answers offered are retry and stop | No alias library reached `bot.js` (a CLI run, or `REJSUDAI_ALIASES` unset) | Set `EXPENSE_ALIAS` to the right code, or run from the app, which passes its whole alias library |
+| A document was skipped without anyone being asked | Asking is off (`REJSUDAI_ASK=0`, or the Settings toggle), or the question timed out and took its default | Turn *Settings → When something goes wrong* back on, or raise the timeout (`0` waits indefinitely) |
+| A queued run looks stuck and the status line reads *Waiting for your answer* | It is paused on a question | Answer it, or let it time out into its default — the timeout exists so a queue is never blocked by a window nobody is watching |

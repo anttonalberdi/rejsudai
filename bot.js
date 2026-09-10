@@ -18,6 +18,21 @@ const CLAIMS_OUTPUT        = process.env.CLAIMS_OUTPUT        || path.join(DEFAU
 // desktop app before creating a settlement.
 const PROJECT_ALIAS        = process.env.EXPENSE_ALIAS        || '';
 const PROJECT_ALIAS_OPTION = process.env.EXPENSE_ALIAS_OPTION || '';
+// Every alias the desktop app has in its library, as JSON [{ name, code }].
+// An alias that indfak2 rejects is a configuration mistake whose fix is another
+// alias, so the question asked about it offers these. A CLI run has none, and
+// the question then offers only trying again and stopping.
+const KNOWN_ALIASES = (() => {
+  try {
+    const list = JSON.parse(process.env.REJSUDAI_ALIASES || '[]');
+    if (!Array.isArray(list)) return [];
+    return list
+      .map(a => ({ code: String((a && a.code) || '').trim(), name: String((a && a.name) || '').trim() }))
+      .filter(a => a.code);
+  } catch {
+    return [];
+  }
+})();
 const EXPENSE_TYPE         = process.env.EXPENSE_TYPE         || '1 -Settlement';
 const EXPENSE_PURPOSE      = process.env.EXPENSE_PURPOSE      || '2 - Outside Denmark';
 // Describes the corporate card so Claude can tell card-paid receipts (which appear
@@ -245,32 +260,276 @@ async function rejsudaiStartScreencast(page) {
   }
 }
 
-// Asks the desktop app for a TOTP code and waits for it on stdin. Used only as
-// the no-TOTP_SECRET fallback; with a secret configured this is never reached.
-function rejsudaiAskGuiForOTP() {
-  return new Promise((resolve, reject) => {
-    rejsudaiEmit('totp_request');
-    let buf = '';
-    const onData = chunk => {
-      buf += chunk;
-      const nl = buf.indexOf('\n');
-      if (nl < 0) return;
+// Chromium's own window, when the run has one to work with. Under the app the
+// page is mirrored into the Browser pane, so the window is a fallback for
+// putting a page right by hand — not the view, and no reason for it to take the
+// screen every time a run starts.
+//
+// It is parked off the bottom of the desktop rather than minimised, which does
+// not work: a minimised window on macOS stops compositing, and everything that
+// depends on the compositor goes with it — the screencast stops dead (the
+// Browser pane freezes, and does not come back when the window is restored),
+// page.screenshot() blocks until it times out, and Playwright's actionability
+// waits crawl (a click on an animating element measured 2.0 s against 0.6 s).
+// A window merely moved out of sight is still a normal, composited window, and
+// measures the same as one on screen. macOS clamps how far it will go, so where
+// it lands is checked rather than assumed.
+//
+// `--no-startup-window` means no window exists until newPage(), so this runs
+// about 20 ms after it appears.
+const OFF_SCREEN_TOP = 20000;
+
+async function rejsudaiStowWindow(browser, page) {
+  // A CLI run has no mirror — moving the only view of the page out of sight
+  // would be a downgrade — and a headless run has no window to move.
+  if (!REJSUDAI_GUI || process.env.REJSUDAI_HEADLESS === '1') return null;
+  try {
+    const browserSession = await browser.newBrowserCDPSession();
+    const pageSession = await page.context().newCDPSession(page);
+    const { targetInfo } = await pageSession.send('Target.getTargetInfo');
+    await pageSession.detach().catch(() => {});
+    const { windowId, bounds: home } = await browserSession.send(
+      'Browser.getWindowForTarget', { targetId: targetInfo.targetId });
+    // Read before the move, so it is the display the window actually started on.
+    const screenHeight = await page.evaluate(() => window.screen.height).catch(() => null);
+
+    const moveTo = bounds => browserSession.send('Browser.setWindowBounds', { windowId, bounds });
+    const where = async () => (await browserSession.send(
+      'Browser.getWindowForTarget', { targetId: targetInfo.targetId })).bounds;
+
+    await moveTo({ left: home.left, top: OFF_SCREEN_TOP, width: home.width, height: home.height });
+    const parked = await where();
+    // A strip of browser across the bottom of the screen is worse than a window
+    // that is simply there, so an unexpected clamp puts it back.
+    if (screenHeight && parked.top < screenHeight) {
+      await moveTo(home).catch(() => {});
+      console.error('Chromium is staying on screen: this display would not let its window move clear.');
+      return null;
+    }
+
+    return {
+      // Bring it back where it started, and to the front — this is called when
+      // the run has stopped to ask for hands on the page.
+      restore: async () => {
+        try {
+          await moveTo(home);
+          await page.bringToFront();
+        } catch {
+          // The window is gone, or this Chromium will not have it. Neither is
+          // worth failing a settlement over.
+        }
+      },
+    };
+  } catch (err) {
+    console.error(`Could not move the Chromium window off screen: ${err.message}`);
+    return null;
+  }
+}
+
+// Set at launch, and read by the questions that ask for hands on the page.
+let BROWSER_WINDOW = null;
+
+// ---------------------------------------------------------------------------
+// ASKING THE USER
+// A run that hits something it cannot get past should not die with the browser
+// still open on the problem — it should ask. Questions go out as an `ask`
+// event and answers come back on stdin: the same round trip the 2FA prompt has
+// always used, generalized. Every question carries an id, so a late answer can
+// never resolve a later prompt, and every question carries a fallback — the
+// answer used when nobody is watching — so an unattended run behaves exactly
+// as it did before there was anyone to ask.
+// ---------------------------------------------------------------------------
+
+// Waiting for a person is only worth doing when there is one. The app sets
+// REJSUDAI_ASK from its “Ask before giving up” setting; a terminal run asks
+// when stdin is a TTY, and a piped or scripted run takes the fallback without
+// ever stopping.
+const ASK_ENABLED = process.env.REJSUDAI_ASK === '1' ? true
+  : process.env.REJSUDAI_ASK === '0' ? false
+  : !!(REJSUDAI_GUI || process.stdin.isTTY);
+
+// Nothing may block a queue forever: an unanswered question falls back to its
+// default after this long. REJSUDAI_ASK_TIMEOUT is in seconds; 0 waits
+// indefinitely, for someone sitting in front of the run.
+const ASK_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.REJSUDAI_ASK_TIMEOUT);
+  return Number.isFinite(raw) && raw >= 0 ? raw * 1000 : 300000;
+})();
+
+// Half of what makes a question worth asking is that there is a browser window
+// to work in. A window parked off screen is still one — askAboutFailure()
+// brings it back — but with Chromium headless there is nothing to put right
+// by hand at all (the Browser pane is a mirror, not a browser), so the answers
+// that depend on it are not offered, and the ones that remain are worded for it.
+const CAN_WORK_THE_PAGE = process.env.REJSUDAI_HEADLESS !== '1';
+
+// Every question and its answer, for the manifest. A run that a person steered
+// should say so: which document was retried, what was left out, where it was
+// stopped. It is also the only place a timed-out question is distinguishable
+// from one somebody actually answered.
+const ASK_LOG = [];
+
+const PENDING_ASKS = new Map(); // id -> resolve
+let ASK_SEQ = 0;
+let ANSWER_CHANNEL_OPEN = false;
+
+// One reader for the whole process — two competing stdin listeners would each
+// eat half the answers. An answer is a JSON line naming the question it belongs
+// to; a bare line (a CLI reply, or an older app build) answers the oldest
+// question still outstanding.
+function openAnswerChannel() {
+  if (ANSWER_CHANNEL_OPEN) return;
+  ANSWER_CHANNEL_OPEN = true;
+  let buf = '';
+  process.stdin.setEncoding('utf8');
+  process.stdin.resume();
+  // A resumed stdin holds the event loop open, which would leave the process
+  // running after the last settlement and stall the app's queue. It is kept
+  // unreferenced except while a question is actually outstanding (see askUser).
+  holdStdin(false);
+  process.stdin.on('data', chunk => {
+    buf += chunk;
+    let nl;
+    while ((nl = buf.indexOf('\n')) >= 0) {
       const line = buf.slice(0, nl).trim();
-      cleanup();
-      if (!line || line === 'CANCEL') reject(new Error('2FA code not provided — run cancelled.'));
-      else resolve(line);
-    };
-    const onEnd = () => { cleanup(); reject(new Error('2FA code not provided — input closed.')); };
-    const cleanup = () => {
-      process.stdin.removeListener('data', onData);
-      process.stdin.removeListener('end', onEnd);
-      process.stdin.pause();
-    };
-    process.stdin.setEncoding('utf8');
-    process.stdin.resume();
-    process.stdin.on('data', onData);
-    process.stdin.once('end', onEnd);
+      buf = buf.slice(nl + 1);
+      deliverAnswer(line);
+    }
   });
+  // Input closing means nobody can answer any more: release every waiter with
+  // its fallback rather than hanging the run on a channel that is gone.
+  process.stdin.on('end', () => {
+    for (const id of [...PENDING_ASKS.keys()]) settleAsk(id, null);
+  });
+}
+
+// stdin is only allowed to keep this process alive while someone might still
+// answer. Guarded because a redirected stdin is not a socket and has no ref().
+function holdStdin(hold) {
+  const fn = hold ? process.stdin.ref : process.stdin.unref;
+  if (typeof fn === 'function') { try { fn.call(process.stdin); } catch {} }
+}
+
+function settleAsk(id, answer) {
+  const resolve = PENDING_ASKS.get(id);
+  if (!resolve) return;
+  PENDING_ASKS.delete(id);
+  resolve(answer);
+}
+
+function deliverAnswer(line) {
+  if (!line) return;
+  if (line.startsWith('{')) {
+    try {
+      const msg = JSON.parse(line);
+      if (msg && msg.id && PENDING_ASKS.has(msg.id)) {
+        settleAsk(msg.id, msg.answer === undefined ? null : msg.answer);
+        return;
+      }
+      // An envelope for a question that has already timed out is stale —
+      // dropping it is what keeps a late answer from landing on the next one.
+      if (msg && msg.id) return;
+    } catch { /* not an answer envelope — treat it as a bare reply */ }
+  }
+  const oldest = PENDING_ASKS.keys().next();
+  if (!oldest.done) settleAsk(oldest.value, line === 'CANCEL' ? null : line);
+}
+
+// The CLI has no modal: the question and its options are printed to stderr, and
+// the shared reader above takes the reply (an option number, or the answer).
+function printCliQuestion(question, detail, options, fallback) {
+  process.stderr.write(`\n? ${question}\n`);
+  if (detail) process.stderr.write(`  ${detail}\n`);
+  options.forEach((o, i) => {
+    process.stderr.write(`  ${i + 1}) ${o.label}${o.value === fallback ? '  (default)' : ''}\n`);
+  });
+  process.stderr.write(options.length ? '  Choose: ' : '  > ');
+}
+
+// Puts a question to whoever is watching and waits for the answer.
+//   options   [{ value, label, detail }] — the choices offered
+//   fallback  the answer used when nobody is there, the reply is empty, or the
+//             question times out. It must be what the run would have done on
+//             its own, so that turning asking off changes nothing.
+//   required  the run cannot continue without an answer (a 2FA code), so it is
+//             asked even where questions are otherwise turned off.
+// Returns the chosen value.
+async function askUser({ kind = 'choice', question, detail = null, context = null, options = [],
+                         fallback = null, required = false, timeoutMs = ASK_TIMEOUT_MS } = {}) {
+  if (!ASK_ENABLED && !required) return fallback;
+  const id = `ask${++ASK_SEQ}`;
+  openAnswerChannel();
+
+  const answered = new Promise(resolve => PENDING_ASKS.set(id, resolve));
+  holdStdin(true);
+  if (REJSUDAI_GUI) {
+    // The app shows the question in a dialog, but the log is what gets read
+    // back afterwards and copied into a bug report, so it goes there too.
+    console.log(`\n  ? ${question}`);
+    rejsudaiEmit('ask', { id, kind, question, detail, context, options, fallback, timeout_ms: timeoutMs });
+  } else {
+    printCliQuestion(question, detail, options, fallback);
+  }
+
+  let timer = null;
+  const reply = await (timeoutMs > 0
+    ? Promise.race([answered, new Promise(resolve => { timer = setTimeout(() => resolve(null), timeoutMs); })])
+    : answered);
+  if (timer) clearTimeout(timer);
+  if (PENDING_ASKS.size <= 1) holdStdin(false);
+
+  // Still pending here means the timeout won. Drop the waiter (so a late answer
+  // is discarded rather than delivered to the next question) and tell the app,
+  // whose modal would otherwise outlive the question it belongs to.
+  const timedOut = PENDING_ASKS.has(id);
+  if (timedOut) {
+    PENDING_ASKS.delete(id);
+    if (REJSUDAI_GUI) rejsudaiEmit('ask_close', { id });
+    console.log(`  No answer within ${Math.round(timeoutMs / 1000)}s.`);
+  }
+
+  const chosen = resolveAnswer(reply, options, fallback);
+  const label = (options.find(o => o.value === chosen) || {}).label || null;
+  // A 2FA code is the one answer that must never reach a log or a manifest —
+  // but a cancelled prompt has to read as cancelled, not as a code supplied.
+  const recorded = kind === 'totp' ? (chosen ? '(code supplied)' : '(no code given)') : chosen;
+  ASK_LOG.push({ at: new Date().toISOString(), kind, question, answer: recorded, label, answered: !timedOut });
+  console.log(`  Answer: ${label || recorded}${timedOut ? ' (nobody answered — the default)' : ''}`);
+  return chosen;
+}
+
+// A reply is the option's own value, the number of an option (how the CLI
+// answers), or — when the question took free text, like a 2FA code — the text.
+// Anything else is treated as no answer at all.
+function resolveAnswer(reply, options, fallback) {
+  if (reply === null || reply === undefined || reply === '') return fallback;
+  const text = String(reply).trim();
+  if (!options.length) return text;
+  const byNumber = options[Number(text) - 1];
+  if (byNumber) return byNumber.value;
+  return options.some(o => o.value === text) ? text : fallback;
+}
+
+// Asks for a 2FA code. The desktop app has its own prompt for kind 'totp'; a
+// terminal run is asked on stderr. Only reached when no TOTP_SECRET is set.
+async function askForOTP() {
+  const code = await askUser({
+    kind: 'totp',
+    question: 'Enter the 6-digit code from your authenticator app.',
+    detail: 'No TOTP secret is configured, so signing in is waiting for a code.',
+    fallback: null,
+    // There is no way past this question: without a code there is no session,
+    // so it is asked even in a run that would otherwise never stop to ask —
+    // including one whose stdin is a pipe rather than a terminal.
+    required: true,
+    // Long enough to go and find the phone, whatever the failure questions are
+    // set to. Zero still means wait for as long as it takes.
+    timeoutMs: ASK_TIMEOUT_MS === 0 ? 0 : Math.max(ASK_TIMEOUT_MS, 120000),
+  });
+  if (!code) throw failure('2FA code not provided — run cancelled.', {
+    hint: 'Set a TOTP secret in Settings so the automation can generate codes itself.',
+  });
+  return String(code).trim();
 }
 
 // ---------------------------------------------------------------------------
@@ -389,8 +648,11 @@ function describeFailure(err) {
 async function reportFailure(page, err) {
   if (err && err.rejsudaiReported) return;
   const info = describeFailure(err);
-  let screenshot = null;
-  if (page) {
+  // A shot taken when the failure happened beats one taken now: if a question
+  // was on screen, the page has been worked on by hand since, and a picture of
+  // the repair explains nothing.
+  let screenshot = (err && err.rejsudaiScreenshot) || null;
+  if (!screenshot && page) {
     const target = path.join(os.tmpdir(), `rejsudai-failure-${Date.now()}.png`);
     const ok = await page.screenshot({ path: target, fullPage: true }).then(() => true).catch(() => false);
     if (ok) screenshot = target;
@@ -408,6 +670,160 @@ async function reportFailure(page, err) {
   return { ...info, screenshot };
 }
 
+// The shape every failure question shares: what broke, what the run knows about
+// it, and the choices — the first being the one worth trying. `info` is a
+// describeFailure() result, so the question reads the same way the failure
+// report would have.
+async function askAboutFailure(question, info, options, { fallback, attempt = 1 } = {}) {
+  // Every one of these questions is about a page, and the answer worth trying
+  // first usually wants hands on it. The window is parked off screen, so bring
+  // it back and to the front — and leave it there: once a run has needed a
+  // person, it has stopped being a background job.
+  if (BROWSER_WINDOW) await BROWSER_WINDOW.restore();
+  return askUser({
+    kind: 'failure',
+    question,
+    detail: [info.title, info.hint].filter(Boolean).join(' — '),
+    context: {
+      file: info.file || null,
+      while: info.while || null,
+      detail: info.detail || null,
+      hint: info.hint || null,
+      raw: info.raw ? info.raw.split('\n')[0] : null,
+      screenshot: info.screenshot || null,
+      attempt,
+    },
+    options,
+    fallback,
+  });
+}
+
+// A document could not be filed, and the browser is still open on the page that
+// failed. Before, that was the end of it: the error went into the manifest and
+// the run moved on. Now it asks, because the three useful answers are all a
+// person's to give — fix the page and retry, leave this one for later, or stop
+// before the rest of the folder goes the same way. The fallback is 'skip', so
+// an unattended run does exactly what it did before.
+async function askAfterExpenseFailure(fileName, info, { attempt = 1 } = {}) {
+  const answer = await askAboutFailure(
+    `${fileName} could not be filed. What should the run do?`,
+    { ...info, file: fileName },
+    [
+      { value: 'retry', label: 'Try this document again',
+        detail: CAN_WORK_THE_PAGE
+          ? 'The browser is paused on the problem — put the page right by hand, then retry.'
+          : 'Files the same document again. Chromium is hidden, so this is for a page that was slow rather than one that needs a hand.' },
+      { value: 'skip',  label: 'Skip it and carry on',
+        detail: 'It stays in the inbox for a later run, and the settlement is left as a draft.' },
+      { value: 'stop',  label: 'Stop the run here',
+        detail: 'Lines already filed stay in the draft; every remaining document keeps for next time.' },
+    ],
+    { fallback: 'skip', attempt });
+  return answer === 'retry' || answer === 'stop' ? answer : 'skip';
+}
+
+// The alias on the draft does not exist in indfak2, or this account cannot use
+// it. That is a configuration mistake rather than a page that misbehaved, and
+// its fix is a different alias — so the question offers the ones the app has in
+// its library instead of leaving "try the same thing again" as the only way
+// forward. Returns the alias to try next, or null to give up: 'stop' is the
+// fallback, so an unattended run ends exactly where it did before.
+async function askAboutAlias(alias, err, attempt = 1) {
+  const info = describeFailure(err);
+  const others = KNOWN_ALIASES.filter(a => a.code !== alias);
+  const answer = await askAboutFailure(
+    `Alias ${alias} could not be used. Which alias should this settlement have?`,
+    info,
+    [
+      ...others.map(a => ({
+        value: `use:${a.code}`,
+        label: a.name ? `${a.name} — ${a.code}` : a.code,
+        detail: 'Fills the draft with this alias instead, for this run only — Settings is left alone.',
+      })),
+      { value: 'retry', label: `Look for ${alias} again`,
+        detail: 'Worth a second go if indfak2 was slow to answer rather than missing the alias.' },
+      { value: 'stop', label: 'Stop the run',
+        detail: 'Nothing is filed, and the failure is reported as it always was.' },
+    ],
+    { fallback: 'stop', attempt });
+  if (typeof answer === 'string' && answer.startsWith('use:')) return answer.slice(4);
+  if (answer === 'retry') return alias;
+  // The user has already been asked about this failure and said stop; the draft
+  // stage around it must not put its own, vaguer question about the same thing.
+  if (ASK_ENABLED) err.rejsudaiAsked = true;
+  return null;
+}
+
+// A stage of the run that can be attempted again on its own — nothing it does
+// is left half-done in a way that a second attempt would duplicate. These are
+// the failures that used to end the run outright, which is a poor answer to a
+// rate-limited Claude call or a login that needed one manual nudge. Now the
+// stage asks: try it again (having put the page right by hand, if that is what
+// it needs), take whatever way past it the caller offers, or stop and let the
+// run's own handler report it exactly as before — which is also what an
+// unattended run does, since 'stop' is the fallback.
+const STAGE_SKIPPED = Symbol('stage skipped');
+
+async function runStage(page, { question, retry, retryDetail, extra = null }, fn) {
+  // What went wrong the first time. A second attempt that breaks somewhere else
+  // is a consequence, not the cause, and reporting only the last one leaves the
+  // user chasing the wrong thing.
+  let origin = null;
+  let originShot = null;
+
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await fn(attempt);
+    } catch (err) {
+      // Nothing on a closed page can be put right by hand, and a retry would
+      // only produce the same question again.
+      if (!page || page.isClosed()) throw err;
+      // The stage put its own question about this and was told to stop; asking
+      // a second, vaguer question about the same failure helps nobody.
+      if (err && err.rejsudaiAsked) throw err;
+      const info = describeFailure(err);
+      console.error(`\n  ✗ ${info.title}`);
+      if (info.hint) console.error(`    → ${info.hint}`);
+      const shot = path.join(os.tmpdir(), `rejsudai-fail-${Date.now()}.png`);
+      const shotOk = await page.screenshot({ path: shot, fullPage: true }).then(() => true).catch(() => false);
+      // Kept on the error so that stopping here reports the page as it was when
+      // it broke, not as it looks after someone has been putting it right.
+      if (shotOk) err.rejsudaiScreenshot = shot;
+      if (!origin) { origin = info; originShot = shotOk ? shot : null; }
+
+      const choice = await askAboutFailure(question, { ...info, screenshot: shotOk ? shot : null }, [
+        { value: 'retry', label: retry, detail: retryDetail },
+        ...(extra ? [extra] : []),
+        { value: 'stop', label: 'Stop the run',
+          detail: 'Nothing further is filed, and the failure is reported as it always was.' },
+      ], { fallback: 'stop', attempt });
+
+      if (choice === 'retry') {
+        console.log(`  Trying again (attempt ${attempt + 1}).`);
+        continue;
+      }
+      if (extra && choice === extra.value) return STAGE_SKIPPED;
+      // Report the failure that started this, with the one the retry ran into
+      // kept alongside it — the first is what has to be fixed, and the second
+      // is usually just the page being somewhere else by then.
+      if (origin.title !== info.title) {
+        err.rejsudai = {
+          title: origin.title,
+          detail: [origin.detail, `Trying again stopped elsewhere: ${info.title}`].filter(Boolean).join(' '),
+          hint: origin.hint,
+          // The step too, or the report reads "Alias … does not exist. While:
+          // opening the Expense module" — a title and a step from two different
+          // failures.
+          step: origin.step,
+          while: origin.while,
+        };
+        if (originShot) err.rejsudaiScreenshot = originShot;
+      }
+      throw err;
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // 2. TOTP
 // ---------------------------------------------------------------------------
@@ -421,14 +837,10 @@ async function getOTP() {
     }
     return totp.generate();
   }
-  // No TOTP_SECRET configured. Under the desktop app, ask the GUI for a code
-  // (a terminal readline prompt would hang a windowed app with no visible
-  // prompt); on the CLI keep the original interactive prompt.
-  if (REJSUDAI_GUI) return rejsudaiAskGuiForOTP();
-  const readline = require('readline').createInterface({ input: process.stdin, output: process.stderr });
-  return new Promise(resolve => {
-    readline.question('Enter TOTP code from your authenticator app: ', code => { readline.close(); resolve(code.trim()); });
-  });
+  // No TOTP_SECRET configured, so a person has to supply the code: the desktop
+  // app shows its 2FA prompt, a terminal run is asked on stderr. Both go
+  // through askUser so there is only ever one reader on stdin.
+  return askForOTP();
 }
 
 // ---------------------------------------------------------------------------
@@ -486,10 +898,24 @@ async function login(page) {
 // ---------------------------------------------------------------------------
 async function openExpenseModule(page) {
   setStep('expense_module', 'opening the Expense module');
-  await page.getByRole('button', { name: 'Expense' }).click();
   const outer = page.locator('iframe[title="ibistic"]').contentFrame();
-  await outer.locator('#ecm_link').waitFor({ timeout: 15000 });
-  await outer.locator('#ecm_link').click();
+  // The draft stage is retried from the top, so this runs again from wherever
+  // the last attempt broke — usually inside the module already, on a half-filled
+  // draft form. The portal's own "Expense" button is no use there (gone, or
+  // matching three elements once a wizard has run): waiting for it times out
+  // and the run is then reported as a slow Expense module, which buries the
+  // real failure — a wrong alias, say. #ecm_link is the way back to the drafts
+  // list from inside the module, the same door submitSettlement uses.
+  const inModule = (await outer.locator('#ecm_link').count().catch(() => 0)) > 0;
+  const backViaNav = inModule &&
+    await outer.locator('#ecm_link').click({ timeout: 8000 }).then(() => true).catch(() => false);
+  if (backViaNav) {
+    console.log('  Already inside the Expense module — went back to the drafts list.');
+  } else {
+    await page.getByRole('button', { name: 'Expense' }).first().click();
+    await outer.locator('#ecm_link').waitFor({ timeout: 15000 });
+    await outer.locator('#ecm_link').click();
+  }
 
   const inner = outer.locator('iframe').contentFrame();
 
@@ -1095,6 +1521,57 @@ function derivePurpose(travel, docs) {
   return EXPENSE_PURPOSE;
 }
 
+// Puts one alias code into the draft's Alias field. Split out of fillNewDraft
+// because a code indfak2 does not know can be answered with another one and
+// tried again, which is not worth re-filling the whole form for. `byPinnedOption`
+// is the configured-label path, and applies only to the alias the run started
+// with — anything chosen afterwards is searched for by code.
+async function selectAlias(page, inner, alias, { byPinnedOption = false } = {}) {
+  setStep('alias', `selecting the project alias ${alias}`);
+  const aliasField = inner.getByRole('textbox', { name: 'Alias *' });
+  await aliasField.click();
+
+  await page.waitForResponse(r => r.url().includes('pinned_and_most_used'), { timeout: 10000 }).catch(() => {});
+  await new Promise(r => setTimeout(r, 300));
+
+  const searchByCode = async () => {
+    const searchResponse = page.waitForResponse(r => r.url().includes('dimension_usages'), { timeout: 15000 });
+    await aliasField.fill(alias);
+    await aliasField.evaluate(el => el.dispatchEvent(new Event('input', { bubbles: true })));
+    await searchResponse;
+    await new Promise(r => setTimeout(r, 500));
+  };
+
+  let aliasOption;
+  if (!byPinnedOption) {
+    // Search by code: the normal path for a new CLI installation, and the only
+    // path once an alias has been chosen in answer to a question.
+    await searchByCode();
+    aliasOption = inner.getByRole('link', { name: new RegExp('^' + alias) }).first();
+  } else {
+    // Config mode: check pinned list first, fall back to search
+    aliasOption = inner.getByText(PROJECT_ALIAS_OPTION, { exact: false });
+    if (!await aliasOption.isVisible().catch(() => false)) await searchByCode();
+  }
+
+  // A wrong alias code fails here, and as a bare locator timeout it is
+  // unreadable — so say which alias was searched for and what indfak2 offered
+  // instead.
+  try {
+    await aliasOption.waitFor({ timeout: 10000 });
+  } catch {
+    const offered = await aliasSearchResults(inner);
+    throw failure(`Alias "${alias}" does not exist in indfak2, or this account cannot use it.`, {
+      detail: offered.length
+        ? `Searching for "${alias}" returned: ${offered.join(' · ')}`
+        : `Searching for "${alias}" returned no projects.`,
+      hint: 'Fix the alias on the settlement, or set the right default alias in Settings.',
+    });
+  }
+  await aliasOption.click();
+  await new Promise(r => setTimeout(r, 800));
+}
+
 async function fillNewDraft(page, inner, invoice, opts = {}) {
   const alias       = opts.alias     || PROJECT_ALIAS;
   const expenseName = opts.draftName || `* ${invoice.vendor} - ${invoice.date.slice(0, 7)}`;
@@ -1113,52 +1590,27 @@ async function fillNewDraft(page, inner, invoice, opts = {}) {
   await selectByPartialLabel(inner.getByLabel('Type'), travel ? 'Travel settlements' : EXPENSE_TYPE);
   await new Promise(r => setTimeout(r, 1000)); // form re-renders on type change
 
-  setStep('alias', `selecting the project alias ${alias}`);
-  const aliasField = inner.getByRole('textbox', { name: 'Alias *' });
-  await aliasField.click();
-
-  await page.waitForResponse(r => r.url().includes('pinned_and_most_used'), { timeout: 10000 }).catch(() => {});
-  await new Promise(r => setTimeout(r, 300));
-
-  let aliasOption;
-  if (opts.alias || !PROJECT_ALIAS_OPTION) {
-    // Search by code when the caller supplied it, or no pinned-list label was
-    // configured. This is the normal path for a new CLI installation.
-    const searchResponse = page.waitForResponse(r => r.url().includes('dimension_usages'), { timeout: 15000 });
-    await aliasField.fill(alias);
-    await aliasField.evaluate(el => el.dispatchEvent(new Event('input', { bubbles: true })));
-    await searchResponse;
-    await new Promise(r => setTimeout(r, 500));
-    aliasOption = inner.getByRole('link', { name: new RegExp('^' + alias) }).first();
-  } else {
-    // Config mode: check pinned list first, fall back to search
-    aliasOption = inner.getByText(PROJECT_ALIAS_OPTION, { exact: false });
-    if (!await aliasOption.isVisible().catch(() => false)) {
-      const searchResponse = page.waitForResponse(r => r.url().includes('dimension_usages'), { timeout: 15000 });
-      await aliasField.fill(alias);
-      await aliasField.evaluate(el => el.dispatchEvent(new Event('input', { bubbles: true })));
-      await searchResponse;
-      await new Promise(r => setTimeout(r, 500));
+  // A wrong alias is the commonest configuration mistake there is, and unlike a
+  // page that misbehaved it has an answer the run can act on: another alias. So
+  // it is asked about right here, with the draft form still open on the field,
+  // instead of costing the whole draft stage a restart.
+  let aliasUsed = alias;
+  let byPinnedOption = !opts.alias && !!PROJECT_ALIAS_OPTION;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await selectAlias(page, inner, aliasUsed, { byPinnedOption });
+      break;
+    } catch (err) {
+      if (page.isClosed()) throw err;
+      const next = await askAboutAlias(aliasUsed, err, attempt);
+      if (next === null) throw err;
+      // An alias picked from the library is looked up by its code — the pinned
+      // label belongs to the alias the run was configured with, not to this one.
+      if (next !== aliasUsed) byPinnedOption = false;
+      aliasUsed = next;
+      console.log(`  Trying alias ${aliasUsed}.`);
     }
   }
-
-  // A wrong alias code fails here, and as a bare locator timeout it is
-  // unreadable — so say which alias was searched for and what indfak2 offered
-  // instead. This is the single most common configuration mistake.
-  try {
-    await aliasOption.waitFor({ timeout: 10000 });
-  } catch {
-    const offered = await aliasSearchResults(inner);
-    const wanted = `Alias "${alias}"`;
-    throw failure(`${wanted} does not exist in indfak2, or this account cannot use it.`, {
-      detail: offered.length
-        ? `Searching for "${alias}" returned: ${offered.join(' · ')}`
-        : `Searching for "${alias}" returned no projects.`,
-      hint: 'Fix the alias on the settlement, or set the right default alias in Settings.',
-    });
-  }
-  await aliasOption.click();
-  await new Promise(r => setTimeout(r, 800));
   setStep('draft', 'filling in the draft form');
 
   // Travel details (Type 2 only): Travel Dates + Departure/Destination places.
@@ -1213,11 +1665,11 @@ async function fillNewDraft(page, inner, invoice, opts = {}) {
     await selectByPartialLabel(inner.getByLabel('Purpose'), purposeLabel);
     const saveErrors2 = await saveAndCheck(inner, inner.getByRole('button', { name: 'Save', exact: true }));
     console.log(`New draft created: "${expenseName}"`);
-    return { name: expenseName, formFields, saveErrors: [...saveErrors1, ...saveErrors2] };
+    return { name: expenseName, alias: aliasUsed, formFields, saveErrors: [...saveErrors1, ...saveErrors2] };
   }
 
   console.log(`New draft created: "${expenseName}"`);
-  return { name: expenseName, formFields, saveErrors: saveErrors1 };
+  return { name: expenseName, alias: aliasUsed, formFields, saveErrors: saveErrors1 };
 }
 
 // ---------------------------------------------------------------------------
@@ -1432,22 +1884,36 @@ async function createNormalCostLine(page, inner, invoice, uploadPath, opts = {})
 // ---------------------------------------------------------------------------
 async function runSingle(page, invoicePath) {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rejsudai-'));
-  const prep = await prepareFile(invoicePath, tmpDir);
-  const invoice = await parseInvoice(prep.parsePath);
+  const { prep, invoice } = await runStage(page, {
+    question: `${path.basename(invoicePath)} could not be read. What should the run do?`,
+    retry: 'Try reading it again',
+    retryDetail: 'Sends the document to Claude again — worth a try when the cause was a rate limit or a network blip.',
+  }, async () => {
+    setStep('parsing', `reading ${path.basename(invoicePath)}`);
+    const prep = await prepareFile(invoicePath, tmpDir);
+    return { prep, invoice: await parseInvoice(prep.parsePath) };
+  });
   console.log('Invoice details:', invoice);
 
-  const { outer, inner } = await openExpenseModule(page);
-  const { action, link } = await pickOrCreateDraft(inner, invoice);
+  const { outer, inner, action, draftName, formFields, saveErrors } = await runStage(page, {
+    question: 'Setting up the draft in indfak2 failed. What should the run do?',
+    retry: 'Try the draft again',
+    retryDetail: 'Goes back to the drafts list and starts over.',
+  }, async () => {
+    const { outer, inner } = await openExpenseModule(page);
+    const { action, link } = await pickOrCreateDraft(inner, invoice);
 
-  let draftName, formFields = {}, saveErrors = [];
-  if (action === 'new') {
-    await link.click();
-    ({ name: draftName, formFields, saveErrors } = await fillNewDraft(page, inner, invoice));
-  } else {
-    await link.click();
-    draftName = (await link.textContent()).trim();
-    console.log(`Opened existing draft: "${draftName}"`);
-  }
+    let draftName, formFields = {}, saveErrors = [];
+    if (action === 'new') {
+      await link.click();
+      ({ name: draftName, formFields, saveErrors } = await fillNewDraft(page, inner, invoice));
+    } else {
+      await link.click();
+      draftName = (await link.textContent()).trim();
+      console.log(`Opened existing draft: "${draftName}"`);
+    }
+    return { outer, inner, action, draftName, formFields, saveErrors };
+  });
 
   const matched = await findMatchingTransaction(page, outer, inner, invoice, draftName);
 
@@ -1463,6 +1929,7 @@ async function runSingle(page, invoicePath) {
     match_reason: matched ? matched.match_reason : null,
     status: matched ? 'draft_with_allocation' : 'draft_no_match',
     errors_detected: saveErrors,
+    questions: ASK_LOG,
   };
 
   if (!matched) {
@@ -1728,21 +2195,48 @@ async function runFolder(page, folderPath) {
 async function runFolderInner(page, folderPath, folderName, alias, settlementName, files, tmpDir) {
   // Parse all documents up-front (before opening the browser flow)
   const docs = [];
+  // Documents left out by hand at this stage. They go back into the manifest at
+  // the end: a file that was skipped belongs on the record rather than being
+  // silently absent from it.
+  const unread = [];
   rejsudaiEmit('phase', { phase: 'parsing', total: files.length });
   for (const f of files) {
     rejsudaiEmit('progress', { phase: 'parsing', index: docs.length + 1, total: files.length, file: path.basename(f) });
-    setStep('parsing', `reading ${path.basename(f)}`);
     console.log(`  Parsing ${path.basename(f)}...`);
-    const prep = await prepareFile(f, tmpDir);
-    const inv  = await parseInvoice(prep.parsePath);
-    console.log(`    → [${inv.document_kind}] ${inv.vendor}  ${inv.amount} ${inv.currency}  ${inv.date}  pay: ${inv.payment_method || '?'}`);
-    docs.push({ ...inv, filePath: f, uploadPath: prep.uploadPath, converted: prep.converted });
+    const parsed = await runStage(page, {
+      question: `${path.basename(f)} could not be read. What should the run do?`,
+      retry: 'Try reading it again',
+      retryDetail: 'Sends the document to Claude again — worth a try when the cause was a rate limit or a network blip.',
+      extra: { value: 'leave_out', label: 'Leave this document out',
+               detail: 'The rest of the folder is filed. This file stays in the inbox and is listed as unread in the manifest.' },
+    }, async () => {
+      setStep('parsing', `reading ${path.basename(f)}`);
+      const prep = await prepareFile(f, tmpDir);
+      const inv  = await parseInvoice(prep.parsePath);
+      return { ...inv, filePath: f, uploadPath: prep.uploadPath, converted: prep.converted };
+    });
+    if (parsed === STAGE_SKIPPED) {
+      console.log('    → left out of the settlement.');
+      unread.push(path.basename(f));
+      continue;
+    }
+    console.log(`    → [${parsed.document_kind}] ${parsed.vendor}  ${parsed.amount} ${parsed.currency}  ${parsed.date}  pay: ${parsed.payment_method || '?'}`);
+    docs.push(parsed);
   }
+  if (docs.length === 0) throw failure('None of the documents in the folder could be read.', {
+    hint: 'The files stay in the inbox. Check they are readable invoices or receipts, then run the settlement again.',
+  });
 
   // Plan the settlement: card expense / out-of-pocket expense / supporting doc
   rejsudaiEmit('phase', { phase: 'planning' });
-  setStep('planning', 'working out what each document is');
-  const { travel } = await planSettlement(docs, settlementName);
+  const { travel } = await runStage(page, {
+    question: 'Working out what each document is failed. What should the run do?',
+    retry: 'Try planning again',
+    retryDetail: 'Asks Claude again with the same documents — worth a try when the cause was a rate limit or a network blip.',
+  }, async () => {
+    setStep('planning', 'working out what each document is');
+    return planSettlement(docs, settlementName);
+  });
   console.log('\nSettlement plan:');
   if (travel) console.log(`  Travel: ${travel.origin_city} (${travel.origin_country}) → ${travel.destination_city} (${travel.destination_country}), ${travel.start} → ${travel.end}`);
   for (const d of docs) console.log(`  ${d.role.padEnd(15)} ${path.basename(d.filePath)} — ${d.plan_reason}`);
@@ -1757,38 +2251,54 @@ async function runFolderInner(page, folderPath, folderName, alias, settlementNam
   const supporting = docs.filter(d => d.role === 'supporting');
   if (expenses.length === 0) throw new Error('Plan found no expense documents in the folder.');
 
-  const { outer, inner } = await openExpenseModule(page);
+  // Opening the module and getting a draft to file into is one stage: it is
+  // safe to run again from the top, because the draft-reuse below is what a
+  // re-run after a crash does anyway — a draft this run half-created is
+  // re-entered by name rather than duplicated.
+  // The alias the draft ends up with, which is not always the one asked for: a
+  // rejected alias can be answered with another (askAboutAlias). It lives out
+  // here because a second attempt at this stage re-enters the draft the first
+  // one created instead of filling the form again.
+  let aliasUsed = alias || PROJECT_ALIAS;
+  const { outer, inner, draftName, formFields, saveErrors, settlementNumber } = await runStage(page, {
+    question: 'Setting up the draft in indfak2 failed. What should the run do?',
+    retry: 'Try the draft again',
+    retryDetail: 'Goes back to the drafts list and starts over. A draft this run already created is re-entered, not duplicated.',
+  }, async () => {
+    const { outer, inner } = await openExpenseModule(page);
 
-  // Reuse an existing draft with this name (left over from a crashed run) so a
-  // re-run continues into the same settlement instead of creating a duplicate.
-  // The draft list is a ui-grid: names are h4 cells inside .ui-grid-row (NOT
-  // links). Clicking the name cell opens the draft.
-  const intendedName = `* ${settlementName}`;
-  await inner.locator('#inner-draft-container .ui-grid-row').first().waitFor({ timeout: 10000 }).catch(() => {});
-  const draftTexts = (await inner.locator('#inner-draft-container .ui-grid-row h4').allTextContents().catch(() => []))
-    .map(t => t.trim()).filter(Boolean);
-  if (draftTexts.length) console.log(`  Existing drafts: ${JSON.stringify([...new Set(draftTexts)])}`);
-  const existingDraft = inner.locator('#inner-draft-container .ui-grid-row h4').filter({ hasText: intendedName }).first();
+    // Reuse an existing draft with this name (left over from a crashed run) so a
+    // re-run continues into the same settlement instead of creating a duplicate.
+    // The draft list is a ui-grid: names are h4 cells inside .ui-grid-row (NOT
+    // links). Clicking the name cell opens the draft.
+    const intendedName = `* ${settlementName}`;
+    await inner.locator('#inner-draft-container .ui-grid-row').first().waitFor({ timeout: 10000 }).catch(() => {});
+    const draftTexts = (await inner.locator('#inner-draft-container .ui-grid-row h4').allTextContents().catch(() => []))
+      .map(t => t.trim()).filter(Boolean);
+    if (draftTexts.length) console.log(`  Existing drafts: ${JSON.stringify([...new Set(draftTexts)])}`);
+    const existingDraft = inner.locator('#inner-draft-container .ui-grid-row h4').filter({ hasText: intendedName }).first();
 
-  let draftName, formFields = {}, saveErrors = [];
-  if (await existingDraft.isVisible().catch(() => false)) {
-    console.log(`  Reusing existing draft "${intendedName}" (from a previous run).`);
-    await existingDraft.click();
-    draftName = intendedName;
-    await new Promise(r => setTimeout(r, 1500));
-  } else {
-    const newDraftLink = inner.locator('#inner-draft-container a').first();
-    await newDraftLink.click();
-    ({ name: draftName, formFields, saveErrors } = await fillNewDraft(page, inner, {}, {
-      draftName: intendedName,
-      alias: alias || undefined,
-      travel: travel || undefined,
-      docs: docs,
-    }));
-  }
+    let draftName, formFields = {}, saveErrors = [];
+    if (await existingDraft.isVisible().catch(() => false)) {
+      console.log(`  Reusing existing draft "${intendedName}" (from a previous run).`);
+      await existingDraft.click();
+      draftName = intendedName;
+      await new Promise(r => setTimeout(r, 1500));
+    } else {
+      const newDraftLink = inner.locator('#inner-draft-container a').first();
+      await newDraftLink.click();
+      ({ name: draftName, alias: aliasUsed, formFields, saveErrors } = await fillNewDraft(page, inner, {}, {
+        draftName: intendedName,
+        alias: alias || undefined,
+        travel: travel || undefined,
+        docs: docs,
+      }));
+    }
 
-  const settlementNumber = await readSettlementNumber(inner);
-  if (settlementNumber) console.log(`  Settlement number: ${settlementNumber}`);
+    const settlementNumber = await readSettlementNumber(inner);
+    if (settlementNumber) console.log(`  Settlement number: ${settlementNumber}`);
+    return { outer, inner, draftName, formFields, saveErrors, settlementNumber };
+  });
 
   // Supporting documents are attached to the first expense line that succeeds.
   let pendingSupport = supporting.map(d => ({
@@ -1807,8 +2317,11 @@ async function runFolderInner(page, folderPath, folderName, alias, settlementNam
 
   // Process each expense into the draft
   const results = [];
+  // Set when the user answers a failure question with "stop": the index of the
+  // document that was being filed, so the rest can be recorded as untouched.
+  let stoppedAt = null;
   rejsudaiEmit('phase', { phase: 'filing', total: expenses.length });
-  for (const doc of expenses) {
+  for (const [docIndex, doc] of expenses.entries()) {
     rejsudaiEmit('progress', { phase: 'filing', index: results.length + 1, total: expenses.length, file: path.basename(doc.filePath), role: doc.role });
     console.log(`\nProcessing: ${path.basename(doc.filePath)} [${doc.role}] (${doc.vendor} ${doc.amount} ${doc.currency})`);
     const docInfo = {
@@ -1824,83 +2337,136 @@ async function runFolderInner(page, folderPath, folderName, alias, settlementNam
       },
     };
 
-    // One failing expense must not kill the whole run — record the error,
-    // restore any supporting docs it claimed, and continue with the rest.
+    // One failing expense must not kill the whole run. The attempt loop is what
+    // makes a retry possible: the browser stays open on the problem while the
+    // question is answered, so putting the page right by hand costs one answer
+    // rather than a whole re-run.
     let extras = [];
-    try {
-      // Always check the transaction grid first — even for pocket_expense. A
-      // matching transaction proves the corporate account paid, whatever the
-      // plan inferred from the receipt, and prevents double reimbursement.
-      const matched = await findMatchingTransaction(page, outer, inner, doc, draftName);
-      if (matched && doc.role === 'pocket_expense') {
-        console.log('  Plan said out-of-pocket, but a matching card transaction exists — allocating it instead.');
-      }
+    let done = false;
+    for (let attempt = 1; !done; attempt++) {
+      try {
+        // Always check the transaction grid first — even for pocket_expense. A
+        // matching transaction proves the corporate account paid, whatever the
+        // plan inferred from the receipt, and prevents double reimbursement.
+        const matched = await findMatchingTransaction(page, outer, inner, doc, draftName);
+        if (matched && doc.role === 'pocket_expense') {
+          console.log('  Plan said out-of-pocket, but a matching card transaction exists — allocating it instead.');
+        }
 
-      if (matched) {
-        extras = takePendingSupport(docInfo.file);
-        // One line PER transaction — multi-selecting rows and clicking Allocate
-        // once only allocates one of them. The same invoice is attached to each
-        // line; supporting docs go on the first.
-        const lineResults = [];
-        for (let i = 0; i < matched.rows.length; i++) {
-          if (matched.rows.length > 1) console.log(`  Allocating transaction ${i + 1}/${matched.rows.length}.`);
-          const res = await allocateOneTransaction(page, inner, matched.rows[i].text, doc.uploadPath, {
-            draftName,
-            openSelectionPage: i > 0,
-            invoice: doc,
-            extraAttachments: i === 0 ? extras : [],
+        if (matched) {
+          extras = takePendingSupport(docInfo.file);
+          // One line PER transaction — multi-selecting rows and clicking Allocate
+          // once only allocates one of them. The same invoice is attached to each
+          // line; supporting docs go on the first.
+          const lineResults = [];
+          for (let i = 0; i < matched.rows.length; i++) {
+            if (matched.rows.length > 1) console.log(`  Allocating transaction ${i + 1}/${matched.rows.length}.`);
+            const res = await allocateOneTransaction(page, inner, matched.rows[i].text, doc.uploadPath, {
+              draftName,
+              openSelectionPage: i > 0,
+              invoice: doc,
+              extraAttachments: i === 0 ? extras : [],
+            });
+            lineResults.push(res);
+            if (res.errors.length) break;
+          }
+          const errors = lineResults.flatMap(r => r.errors);
+          const allSaved = lineResults.length === matched.rows.length && errors.length === 0;
+          // If the very first line failed, its supporting docs were not attached
+          if (!allSaved && extras.length && lineResults[0] && lineResults[0].errors.length) {
+            pendingSupport = extras; supportAttachedTo = null;
+          }
+          results.push({
+            ...docInfo, attempts: attempt, expense_type: 'From Card Transaction', matched: true,
+            transaction_row: matched.transaction_row, match_reason: matched.match_reason,
+            lines_created: lineResults.filter(r => !r.errors.length).length,
+            lines_expected: matched.rows.length,
+            fields_entered: lineResults[0] ? lineResults[0].fields : null,
+            errors, moved_to_output: allSaved,
           });
-          lineResults.push(res);
-          if (res.errors.length) break;
+        } else if (doc.role === 'pocket_expense' || doc.role === 'unknown_expense') {
+          // Out of pocket (or no transaction found for an unknown) → Normal cost line
+          if (doc.role === 'unknown_expense') console.log('  No card transaction — falling back to Normal cost.');
+          extras = takePendingSupport(docInfo.file);
+          const { errors, fields } = await createNormalCostLine(page, inner, doc, doc.uploadPath,
+            { draftName, extraAttachments: extras });
+          results.push({
+            ...docInfo, attempts: attempt, expense_type: 'Normal Cost', matched: false,
+            transaction_row: null, fields_entered: fields, errors,
+            moved_to_output: errors.length === 0,
+          });
+        } else {
+          console.log('  ⚠ No match — skipping (left in inbox for retry).');
+          results.push({
+            ...docInfo, attempts: attempt, expense_type: null, matched: false, transaction_row: null,
+            fields_entered: null, errors: [], moved_to_output: false,
+          });
         }
-        const errors = lineResults.flatMap(r => r.errors);
-        const allSaved = lineResults.length === matched.rows.length && errors.length === 0;
-        // If the very first line failed, its supporting docs were not attached
-        if (!allSaved && extras.length && lineResults[0] && lineResults[0].errors.length) {
-          pendingSupport = extras; supportAttachedTo = null;
+        done = true;
+      } catch (err) {
+        // A closed browser cannot be put right on the page, and asking would
+        // only produce the same question on every retry. Let it out to the
+        // run's own handler, which reports it and ends the run.
+        if (page.isClosed()) throw err;
+        const info = describeFailure(err);
+        console.error(`  ✗ Failed on ${docInfo.file}: ${info.title}`);
+        if (info.hint) console.error(`    → ${info.hint}`);
+        const shot = path.join(os.tmpdir(), `rejsudai-fail-${docInfo.file.replace(/[^a-z0-9]/gi, '_')}.png`);
+        const shotOk = await page.screenshot({ path: shot, fullPage: true }).then(() => true).catch(() => false);
+        if (extras.length) { pendingSupport = extras; supportAttachedTo = null; extras = []; }
+        // Tidy the page before anyone is asked to look at it, and so a retry
+        // starts from the line-items tab rather than a half-open dialog.
+        await closeAllocationDialogIfOpen(inner).catch(() => {});
+
+        const choice = await askAfterExpenseFailure(docInfo.file,
+          { ...info, screenshot: shotOk ? shot : null }, { attempt });
+        if (choice === 'retry') {
+          console.log(`  Retrying ${docInfo.file} (attempt ${attempt + 1}).`);
+          continue;
         }
+        // Skipped or stopped: the error still has to be readable in the
+        // manifest and in the app's result table.
         results.push({
-          ...docInfo, expense_type: 'From Card Transaction', matched: true,
-          transaction_row: matched.transaction_row, match_reason: matched.match_reason,
-          lines_created: lineResults.filter(r => !r.errors.length).length,
-          lines_expected: matched.rows.length,
-          fields_entered: lineResults[0] ? lineResults[0].fields : null,
-          errors, moved_to_output: allSaved,
+          ...docInfo, attempts: attempt, expense_type: null, matched: false, transaction_row: null,
+          fields_entered: null, errors: [info.title], moved_to_output: false,
+          error_detail: { while: info.while, detail: info.detail, hint: info.hint, screenshot: shotOk ? shot : null, raw: info.raw.split('\n')[0] },
         });
-      } else if (doc.role === 'pocket_expense' || doc.role === 'unknown_expense') {
-        // Out of pocket (or no transaction found for an unknown) → Normal cost line
-        if (doc.role === 'unknown_expense') console.log('  No card transaction — falling back to Normal cost.');
-        extras = takePendingSupport(docInfo.file);
-        const { errors, fields } = await createNormalCostLine(page, inner, doc, doc.uploadPath,
-          { draftName, extraAttachments: extras });
-        results.push({
-          ...docInfo, expense_type: 'Normal Cost', matched: false,
-          transaction_row: null, fields_entered: fields, errors,
-          moved_to_output: errors.length === 0,
-        });
-      } else {
-        console.log('  ⚠ No match — skipping (left in inbox for retry).');
-        results.push({
-          ...docInfo, expense_type: null, matched: false, transaction_row: null,
-          fields_entered: null, errors: [], moved_to_output: false,
-        });
+        if (choice === 'stop') stoppedAt = docIndex;
+        done = true;
       }
-    } catch (err) {
-      // One expense failing is not fatal, but its error still has to be
-      // readable in the manifest and in the app's result table.
-      const info = describeFailure(err);
-      console.error(`  ✗ Failed on ${docInfo.file}: ${info.title}`);
-      if (info.hint) console.error(`    → ${info.hint}`);
-      const shot = path.join(os.tmpdir(), `rejsudai-fail-${docInfo.file.replace(/[^a-z0-9]/gi, '_')}.png`);
-      const shotOk = await page.screenshot({ path: shot, fullPage: true }).then(() => true).catch(() => false);
-      if (extras.length) { pendingSupport = extras; supportAttachedTo = null; }
-      results.push({
-        ...docInfo, expense_type: null, matched: false, transaction_row: null,
-        fields_entered: null, errors: [info.title], moved_to_output: false,
-        error_detail: { while: info.while, detail: info.detail, hint: info.hint, screenshot: shotOk ? shot : null, raw: info.raw.split('\n')[0] },
-      });
-      await closeAllocationDialogIfOpen(inner).catch(() => {});
     }
+    if (stoppedAt !== null) break;
+  }
+
+  // A run stopped by hand leaves the rest of the folder untouched. Those
+  // documents are recorded as unprocessed so the manifest is honest about them,
+  // their files stay in the inbox, and — the part that matters — the submit
+  // gate below sees an incomplete settlement and will not send it.
+  if (stoppedAt !== null) {
+    for (const doc of expenses.slice(stoppedAt + 1)) {
+      results.push({
+        file: path.basename(doc.filePath), role: doc.role, plan_reason: doc.plan_reason,
+        parsed_invoice: {
+          vendor: doc.vendor, amount: doc.amount, currency: doc.currency, date: doc.date,
+          document_kind: doc.document_kind || null, payment_method: doc.payment_method || null,
+          keywords: doc.keywords || [],
+        },
+        expense_type: null, matched: false, transaction_row: null, fields_entered: null,
+        errors: ['Not attempted — the run was stopped.'], moved_to_output: false,
+      });
+    }
+    console.log(`\n■ Run stopped — ${expenses.length - stoppedAt - 1} document(s) left for a later run.`);
+  }
+
+  // A document that was left out at the reading stage never reached the loop,
+  // so nothing above has recorded it. It belongs in the manifest, and in the
+  // count that keeps an incomplete settlement from being sent for approval.
+  for (const file of unread) {
+    results.push({
+      file, role: null, plan_reason: null, parsed_invoice: null,
+      expense_type: null, matched: false, transaction_row: null, fields_entered: null,
+      errors: ['Could not be read — left out of the settlement.'], moved_to_output: false,
+    });
   }
 
   const allocatedCount = results.filter(r => r.moved_to_output).length;
@@ -1957,7 +2523,7 @@ async function runFolderInner(page, folderPath, folderName, alias, settlementNam
       draft_name: draftName,
       settlement_number: settlementNumber || null,
       original_folder: folderName,
-      alias: alias || PROJECT_ALIAS,
+      alias: aliasUsed,
       type: travel ? '2 - Travel settlements (days,expenses,transp.)' : EXPENSE_TYPE,
       purpose: derivePurpose(travel, docs),
       travel: travel || null,
@@ -1968,6 +2534,9 @@ async function runFolderInner(page, folderPath, folderName, alias, settlementNam
       expenses_normal_cost: results.filter(r => r.expense_type === 'Normal Cost' && r.moved_to_output).length,
       expenses_unprocessed: unmatchedCount,
       submit: submitState,
+      // What a person was asked during this run, and what they answered — so a
+      // settlement someone steered by hand says so on the record.
+      questions: ASK_LOG,
       status: submitState.submitted
         ? 'SUBMITTED — sent for approval'
         : SUBMIT_SETTLEMENT
@@ -2032,12 +2601,32 @@ async function run() {
   // so CLI behaviour is unchanged; the desktop app's Settings toggle sets it to 1.
   const browser = await chromium.launch({ headless: process.env.REJSUDAI_HEADLESS === '1', slowMo: 700 });
   const page    = await browser.newPage();
+  // GUI only: the window has just appeared — move it out of sight before it has
+  // had time to take the screen. It comes back on its own if a question needs
+  // the page worked on by hand.
+  BROWSER_WINDOW = await rejsudaiStowWindow(browser, page);
   // GUI only: stream the page to the desktop app's Browser pane.
   const stopScreencast = await rejsudaiStartScreencast(page);
 
   try {
-    setStep('login', 'signing in to indfak2');
-    await login(page);
+    // Signing in is the one stage where the useful answer is often neither
+    // retry nor stop: the browser is open on the login page, so finishing the
+    // sign-in by hand and telling the run to carry on gets past a rejected code
+    // or an unexpected prompt without starting over.
+    const signedIn = await runStage(page, {
+      question: 'Signing in to indfak2 failed. What should the run do?',
+      retry: 'Try signing in again',
+      retryDetail: 'Starts the sign-in over from the login page.',
+      // Signing in by hand needs a window to sign in through.
+      extra: CAN_WORK_THE_PAGE
+        ? { value: 'carry_on', label: 'I have signed in myself — carry on',
+            detail: 'Uses the session in the open browser window and goes straight to the settlement.' }
+        : null,
+    }, async () => {
+      setStep('login', 'signing in to indfak2');
+      await login(page);
+    });
+    if (signedIn === STAGE_SKIPPED) console.log('Carrying on with the session already open in the browser.');
     if (isFolder) {
       await runFolder(page, targetPath);
     } else {
@@ -2051,6 +2640,7 @@ async function run() {
     throw err;
   } finally {
     if (stopScreencast) await stopScreencast();
+    BROWSER_WINDOW = null;
     await browser.close();
   }
 }
@@ -2068,4 +2658,7 @@ if (require.main === module) {
 }
 
 module.exports = { readSettlementMeta, prepareFile, parseInvoice, planSettlement, login, openExpenseModule,
-                   setStep, failure, describeFailure };
+                   setStep, failure, describeFailure, reportFailure,
+                   askUser, askForOTP, askAboutFailure, askAfterExpenseFailure, askAboutAlias,
+                   runStage, STAGE_SKIPPED,
+                   ASK_LOG };

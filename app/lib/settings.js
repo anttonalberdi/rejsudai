@@ -30,6 +30,14 @@ const DEFAULTS = {
   corporateCard:
     'SEB Eurocard (a Mastercard) — and the SEB Rejsekonto corporate travel account, which travel-agency invoices (e.g. CWT) are charged to (card references like "DC 3614...")',
   headless: false,
+  // Whether a run stops and asks when it cannot file a document, instead of
+  // recording the error and moving on. Off means the old behaviour: skip and
+  // carry on, unattended.
+  askOnFailure: true,
+  // How long a question waits for an answer before taking its default, so a
+  // queue of settlements can never be blocked by one nobody is watching.
+  // 0 waits indefinitely.
+  askTimeoutSeconds: 300,
   // 'auto' follows the system appearance; 'light'/'dark' pin it. Applied to
   // nativeTheme in main.js (window chrome, native dialogs) and to the
   // documentElement in the renderer (the CSS tokens).
@@ -104,6 +112,14 @@ function nameFromOption(option) {
   return m ? m[1].trim() : '';
 }
 
+// Seconds, non-negative, capped at an hour — a hand-edited settings file is
+// the only way a nonsense value gets here, and it must not hang a run.
+function normalizeAskTimeout(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) return DEFAULTS.askTimeoutSeconds;
+  return Math.min(3600, Math.round(n));
+}
+
 function read() {
   let raw = {};
   try {
@@ -114,6 +130,7 @@ function read() {
   const merged = { ...DEFAULTS, ...raw };
   merged.aliases = normalizeAliases(merged.aliases);
   merged.layout = normalizeLayout(merged.layout);
+  merged.askTimeoutSeconds = normalizeAskTimeout(merged.askTimeoutSeconds);
   if (!THEMES.includes(merged.theme)) merged.theme = DEFAULTS.theme;
   // Installs from before the alias library kept their one alias in
   // expenseAlias/expenseAliasOption; carry it in so a first run has something
@@ -131,6 +148,8 @@ function write(patch) {
   const next = { ...read(), ...(patch || {}) };
   next.aliases = normalizeAliases(next.aliases, { strict: !!(patch && 'aliases' in patch) });
   next.layout = normalizeLayout(next.layout);
+  next.askTimeoutSeconds = normalizeAskTimeout(next.askTimeoutSeconds);
+  next.askOnFailure = !!next.askOnFailure;
   if (!THEMES.includes(next.theme)) next.theme = DEFAULTS.theme;
   next.aliasesSeeded = true;
   // expenseAlias points into the library, so it has to name an entry that is

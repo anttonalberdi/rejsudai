@@ -163,6 +163,39 @@ function wireResizer(handle, { axis, box, key }) {
 wireResizer($('#resize-list'), { axis: 'x', box: () => runView, key: 'listPct' });
 wireResizer($('#resize-browser'), { axis: 'y', box: () => $('.panel-right'), key: 'browserPct' });
 
+/* ------------------------------------------------------- browser/details -- */
+// One pane, two things worth looking at: what the browser is doing right now,
+// and what became of a settlement. A run puts the browser up, because that is
+// the thing that is moving; clicking a settlement puts its details up, because
+// that is the thing that was asked about.
+let activePane = 'browser';
+// The settlement the Details tab is showing, so a re-render (a run finishing,
+// the inbox being re-scanned) keeps it on the same one.
+let detailsFor = null;
+
+function showPane(name) {
+  activePane = name;
+  for (const tab of document.querySelectorAll('.pane-tab')) {
+    const on = tab.dataset.pane === name;
+    tab.classList.toggle('is-active', on);
+    tab.setAttribute('aria-selected', String(on));
+  }
+  $('#pane-browser').hidden = name !== 'browser';
+  $('#pane-details').hidden = name !== 'details';
+}
+
+document.querySelectorAll('.pane-tab').forEach(tab => {
+  tab.addEventListener('click', () => showPane(tab.dataset.pane));
+});
+
+// Clicking a settlement is the ordinary way in: it selects the card, fills the
+// pane and brings it to the front.
+function openDetails(item) {
+  detailsFor = item.id;
+  showPane('details');
+  render();
+}
+
 $('#btn-browser-expand').addEventListener('click', event => {
   const expanded = $('#view-run').classList.toggle('is-browser-expanded');
   event.currentTarget.textContent = expanded ? 'Collapse' : 'Expand';
@@ -197,9 +230,54 @@ function aliasLabel(code) {
 }
 
 /* ------------------------------------------------------------ list view -- */
+// "Done" said nothing about the thing a person actually wants to know at the
+// end of a run: whether indfak2 has the settlement, or whether it is still
+// sitting there waiting to be sent. A filed settlement is **Ready** — the draft
+// is complete and the approval is yours to press — and one that went out on its
+// own is **Submitted**.
 function statusLabel(s) {
-  return { queued: 'Queued', running: 'Running', done: 'Done', submitted: 'Submitted',
-           error: 'Failed', cancelled: 'Cancelled' }[s] || 'Ready';
+  return { queued: 'Queued', running: 'Running', done: 'Ready', submitted: 'Submitted',
+           error: 'Failed', cancelled: 'Cancelled' }[s] || 'Not filed';
+}
+
+// The chip is two words at most, so the distinction it is drawing is spelled
+// out where there is room for it.
+const STATUS_HINT = {
+  done: 'Filed as a draft in indfak2 — ready for you to send for approval',
+  submitted: 'Sent to indfak2 for approval',
+  error: 'This settlement did not file — see the Details tab',
+  cancelled: 'The run was stopped before this settlement finished',
+  running: 'Being filed into indfak2 now',
+  queued: 'Waiting to be filed',
+};
+
+// A trash can, drawn rather than shipped as an asset: lid, handle, body and two
+// score lines. createElementNS because SVG is not HTML — document.createElement
+// would make an unrendered HTMLUnknownElement.
+function trashIcon() {
+  const NS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('viewBox', '0 0 16 16');
+  svg.setAttribute('width', '15');
+  svg.setAttribute('height', '15');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.setAttribute('fill', 'none');
+  svg.setAttribute('stroke', 'currentColor');
+  svg.setAttribute('stroke-width', '1.3');
+  svg.setAttribute('stroke-linecap', 'round');
+  svg.setAttribute('stroke-linejoin', 'round');
+  for (const d of [
+    'M2.5 4h11',                        // lid
+    'M6.5 4V2.6h3V4',                   // handle
+    'M4 4l.6 8.5a1 1 0 0 0 1 .9h4.8a1 1 0 0 0 1-.9L12 4',  // body
+    'M6.7 6.6v4.4',                     // score lines
+    'M9.3 6.6v4.4',
+  ]) {
+    const path = document.createElementNS(NS, 'path');
+    path.setAttribute('d', d);
+    svg.appendChild(path);
+  }
+  return svg;
 }
 
 // What went wrong, in the order a person needs it: the cause, the step it
@@ -243,6 +321,38 @@ function render() {
   for (const item of all) {
     const li = el('li', 'settlement');
     if (item.status) li.classList.add(`is-${item.status}`);
+    if (item.id === detailsFor) li.classList.add('is-active');
+
+    // Clicking the card is what opens its details, so it says so.
+    li.tabIndex = 0;
+    li.setAttribute('role', 'button');
+    li.addEventListener('click', event => {
+      // The checkbox, the bin and the action buttons are their own thing.
+      if (event.target.closest('button, input, a')) return;
+      openDetails(item);
+    });
+    li.addEventListener('keydown', event => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      if (event.target !== li) return;
+      event.preventDefault();
+      openDetails(item);
+    });
+
+    // A settlement saved but not yet filed is only its inbox folder, so
+    // removing it deletes that folder. One whose folder the automation already
+    // consumed is just a row left for its result — that only leaves the list.
+    const onDisk = item.onDisk !== false;
+    const rm = el('button', 'settlement-del');
+    rm.appendChild(trashIcon());
+    rm.title = item.removing ? 'Removing…'
+      : onDisk
+        ? 'Delete this settlement and the receipts copied into its inbox folder'
+        : 'Take this finished settlement off the list';
+    rm.setAttribute('aria-label', rm.title);
+    rm.disabled = running || !!item.removing;
+    if (item.removing) rm.classList.add('is-busy');
+    rm.addEventListener('click', () => removeSettlement(item));
+    li.appendChild(rm);
 
     const box = el('input');
     box.type = 'checkbox';
@@ -262,14 +372,7 @@ function render() {
     bits.push(item.folder);
     main.appendChild(el('div', 'settlement-meta', bits.join(' · ')));
 
-    if (item.error) main.appendChild(failureBlock(item));
-
     const actions = el('div', 'settlement-actions');
-    if (item.manifest) {
-      const b = el('button', 'btn btn-quiet', 'Details');
-      b.addEventListener('click', () => showResult(item));
-      actions.appendChild(b);
-    }
     if (item.outputFolder) {
       const b = el('button', 'btn btn-quiet', 'Open output folder');
       b.addEventListener('click', () => window.rejsudai.shell.openPath(item.outputFolder));
@@ -280,27 +383,17 @@ function render() {
       b.addEventListener('click', () => window.rejsudai.shell.openPath(item.manifestPath));
       actions.appendChild(b);
     }
-    // A settlement saved but not yet filed is only its inbox folder, so removing
-    // it deletes that folder. One whose folder the automation already consumed
-    // is just a row left for its result — that only leaves the list.
-    const onDisk = item.onDisk !== false;
-    const rm = el('button', 'btn btn-quiet btn-danger',
-      item.removing ? 'Removing…' : onDisk ? 'Remove' : 'Remove from list');
-    rm.title = onDisk
-      ? 'Delete this settlement and the receipts copied into its inbox folder'
-      : 'Take this finished settlement off the list';
-    rm.disabled = running || !!item.removing;
-    rm.addEventListener('click', () => removeSettlement(item));
-    actions.appendChild(rm);
-    main.appendChild(actions);
+    if (actions.childNodes.length) main.appendChild(actions);
     li.appendChild(main);
 
     const status = el('span', 'status', statusLabel(item.status));
     if (item.status) status.dataset.status = item.status;
+    if (STATUS_HINT[item.status]) status.title = STATUS_HINT[item.status];
     li.appendChild(status);
     list.appendChild(li);
   }
   syncSelection();
+  renderDetails();
 }
 
 function selected() {
@@ -330,9 +423,13 @@ $('#select-all').addEventListener('change', e => {
 
 async function scanInbox() {
   const res = await window.rejsudai.inbox.scan();
+  // scan() creates the inbox when it is merely missing, so getting here means
+  // the path itself is unusable — say what went wrong rather than pointing at a
+  // Settings field, which no longer holds the inbox path.
   $('#inbox-error').hidden = res.exists;
   if (!res.exists) {
-    $('#inbox-error').textContent = `Inbox folder not found: ${res.inbox} — set it in Settings.`;
+    $('#inbox-error').textContent =
+      `Could not open the receipts inbox at ${res.inbox}${res.error ? ` — ${res.error}` : ''}`;
   }
   const previous = new Map(items);
   items.clear();
@@ -360,6 +457,7 @@ async function removeSettlement(item) {
   if (running || item.removing) return;
   if (item.onDisk === false) {
     items.delete(item.id);
+    if (detailsFor === item.id) detailsFor = null;
     render();
     return;
   }
@@ -371,6 +469,7 @@ async function removeSettlement(item) {
     const res = await window.rejsudai.inbox.remove(item.path);
     if (res && res.cancelled) return;
     items.delete(item.id);
+    if (detailsFor === item.id) detailsFor = null;
     appendLog(
       res && res.missing
         ? `The folder for "${item.settlementName || item.folder}" was already gone — taken off the list.\n`
@@ -437,9 +536,14 @@ $('#btn-cancel').addEventListener('click', () => {
 let wasRunning = false;
 function setRunning(state) {
   running = state.busy;
+  if (!wasRunning && running) showPane('browser');
   // A finished batch changes the inbox: processed folders are gone, partly
   // processed ones have fewer files left.
-  if (wasRunning && !running) scanInbox();
+  if (wasRunning && !running) {
+    scanInbox();
+    const failed = [...items.values()].find(i => i.status === 'error');
+    if (failed) openDetails(failed);
+  }
   wasRunning = running;
   $('#btn-cancel').hidden = !running;
   $('#btn-new').disabled = running;
@@ -473,7 +577,11 @@ window.rejsudai.onProgress(p => {
   // attributed to, so the two always read the same way.
   if (p.event === 'step') statusLine.step = p.label || '';
   if (p.event === 'error') statusLine.step = '';
-  if (p.event === 'phase' || p.event === 'progress' || p.event === 'step' || p.event === 'error') showStatus();
+  // A question blocks the run until it is answered or times out; without this
+  // the status line still reads as the step that failed, and the run looks hung.
+  if (p.event === 'ask') statusLine.step = 'waiting for your answer';
+  if (p.event === 'ask_close') statusLine.step = '';
+  if (['phase', 'progress', 'step', 'error', 'ask', 'ask_close'].includes(p.event)) showStatus();
 });
 
 window.rejsudai.onSettlement(async p => {
@@ -826,15 +934,156 @@ $('#totp-input').addEventListener('keydown', e => {
   if (e.key === 'Enter') $('#totp-ok').click();
 });
 
-/* ---------------------------------------------------------- result modal -- */
-function showResult(item) {
-  const m = item.manifest;
-  $('#result-title').textContent = item.settlementName || item.folder;
-  const body = $('#result-body');
+/* ------------------------------------------------------------- ask modal -- */
+// The run has stopped and is waiting on an answer. Ignoring this window is a
+// safe thing to do: every question carries the option it takes on its own, and
+// the countdown says which one and when.
+let askTimer = null;
+
+function hideAsk() {
+  if (askTimer) { clearInterval(askTimer); askTimer = null; }
+  $('#ask-modal').hidden = true;
+}
+
+function showAsk(q) {
+  hideAsk();
+  $('#ask-question').textContent = q.question || 'The run needs an answer.';
+  const detail = $('#ask-detail');
+  detail.textContent = q.detail || '';
+  detail.hidden = !q.detail;
+
+  // What the run knows about the problem, in the same order the failure block
+  // on a settlement card puts it: the step it was on, then the raw message.
+  const ctx = q.context || {};
+  const raw = $('#ask-raw');
+  raw.textContent = [ctx.while ? `While ${ctx.while}.` : '', ctx.raw || ''].filter(Boolean).join('\n');
+  raw.hidden = !raw.textContent;
+
+  const shot = $('#ask-shot');
+  shot.hidden = !ctx.screenshot;
+  shot.onclick = () => window.rejsudai.shell.openPath(ctx.screenshot);
+
+  // Which try this is. On a third attempt at the same document, knowing that
+  // the last two did not work is most of what decides the answer.
+  const attempt = $('#ask-attempt');
+  attempt.textContent = ctx.attempt > 1 ? `Attempt ${ctx.attempt}` : '';
+  attempt.hidden = !(ctx.attempt > 1);
+
+  const box = $('#ask-options');
+  box.textContent = '';
+  for (const [i, option] of (q.options || []).entries()) {
+    const b = el('button', `btn ask-option${i === 0 ? ' btn-primary' : ' btn-quiet'}`);
+    // Only the first nine can be answered from the keyboard, so only those
+    // carry the number that does it.
+    if (i < 9) b.appendChild(el('span', 'ask-option-key', String(i + 1)));
+    const text = el('span', 'ask-option-text');
+    text.appendChild(el('span', 'ask-option-label', option.label));
+    if (option.detail) text.appendChild(el('span', 'ask-option-detail', option.detail));
+    b.appendChild(text);
+    b.addEventListener('click', () => {
+      window.rejsudai.run.answer(q.id, option.value);
+      hideAsk();
+    });
+    box.appendChild(b);
+  }
+
+  const fallback = (q.options || []).find(o => o.value === q.fallback);
+  const countdown = $('#ask-countdown');
+  const deadline = q.timeout_ms > 0 ? Date.now() + q.timeout_ms : 0;
+  const tick = () => {
+    if (!deadline) {
+      countdown.textContent = 'The run is paused until you answer.';
+      return;
+    }
+    const left = Math.max(0, Math.round((deadline - Date.now()) / 1000));
+    const clock = `${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`;
+    countdown.textContent = fallback
+      ? `No answer in ${clock} → ${fallback.label.toLowerCase()}`
+      : `Closing in ${clock}`;
+    // bot.js has moved on by now and its ask_close is on the way; closing here
+    // keeps the window from sitting there dead in the meantime.
+    if (left <= 0) hideAsk();
+  };
+  tick();
+  if (deadline) askTimer = setInterval(tick, 1000);
+  $('#ask-modal').hidden = false;
+  // A dialog that blocks the run should be answerable without reaching for the
+  // mouse, and focus must not wander off behind it.
+  const first = box.querySelector('button');
+  if (first) first.focus();
+}
+
+// The options are numbered in the order they are shown, so 1/2/3 answer;
+// the arrows move between them, and Tab stays inside the dialog. Escape is
+// deliberately not bound — every answer here changes what the run does, and
+// none of them should be one keystroke away by accident.
+$('#ask-modal').addEventListener('keydown', e => {
+  const options = [...$('#ask-options').querySelectorAll('button')];
+  if (!options.length) return;
+
+  if (/^[1-9]$/.test(e.key)) {
+    const chosen = options[Number(e.key) - 1];
+    if (chosen) { e.preventDefault(); chosen.click(); }
+    return;
+  }
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    const at = options.indexOf(document.activeElement);
+    const step = e.key === 'ArrowDown' ? 1 : -1;
+    options[(at < 0 ? 0 : at + step + options.length) % options.length].focus();
+    return;
+  }
+  if (e.key === 'Tab') {
+    const inside = [...$('#ask-modal').querySelectorAll('button')].filter(b => !b.hidden);
+    const edge = e.shiftKey ? inside[0] : inside[inside.length - 1];
+    if (document.activeElement === edge) {
+      e.preventDefault();
+      (e.shiftKey ? inside[inside.length - 1] : inside[0]).focus();
+    }
+  }
+});
+
+window.rejsudai.onAsk(showAsk);
+window.rejsudai.onAskClose(hideAsk);
+
+/* --------------------------------------------------------- details pane -- */
+// Everything known about one settlement: what went wrong if something did, then
+// what was filed, what was asked, and where each document ended up. Reads from
+// `items`, not from a captured argument, so it can be re-run whenever the
+// settlement changes underneath it.
+function renderDetails() {
+  const item = detailsFor && items.get(detailsFor);
+  const title = $('#details-title');
+  const body = $('#details-body');
   body.textContent = '';
 
+  const folderBtn = $('#details-open-folder');
+  const manifestBtn = $('#details-open-manifest');
+  folderBtn.onclick = () => item && window.rejsudai.shell.openPath(item.outputFolder);
+  manifestBtn.onclick = () => item && window.rejsudai.shell.openPath(item.manifestPath);
+  folderBtn.disabled = !(item && item.outputFolder);
+  manifestBtn.disabled = !(item && item.manifestPath);
+
+  if (!item) {
+    detailsFor = null;
+    title.textContent = 'Details';
+    body.appendChild(el('p', 'details-idle',
+      'Click a settlement to see what happened to it — what was filed, what was asked, and anything that went wrong.'));
+    return;
+  }
+
+  title.textContent = item.settlementName || item.folder;
+
+  // The failure comes first: it is the reason the pane was opened.
+  if (item.error) body.appendChild(failureBlock(item));
+
+  const m = item.manifest;
   if (!m || !m.settlement) {
-    body.appendChild(el('p', 'subtle', 'No manifest was written for this run.'));
+    body.appendChild(el('p', 'subtle', item.error
+      ? 'No manifest was written for this run.'
+      : item.status === 'running'
+        ? 'This settlement is being filed. Its result appears here when the run finishes.'
+        : 'This settlement has not been filed yet.'));
   } else {
     const s = m.settlement;
     const tallies = el('div', 'tallies');
@@ -864,6 +1113,23 @@ function showResult(item) {
       body.appendChild(line);
     }
 
+    // A settlement somebody steered by hand is not the same kind of result as
+    // one the automation reached on its own, so the questions it was asked —
+    // and what was answered — are part of what happened. 2FA is left out: it is
+    // asked of every run and says nothing about this one.
+    const asked = (s.questions || []).filter(q => q.kind !== 'totp');
+    if (asked.length) {
+      body.appendChild(el('p', 'subtle', asked.length === 1
+        ? 'One question was asked during this run:'
+        : `${asked.length} questions were asked during this run:`));
+      const list = el('ul', 'steps');
+      for (const q of asked) {
+        list.appendChild(el('li', null,
+          `${q.question} → ${q.label || q.answer}${q.answered ? '' : ' (nobody answered — the default was taken)'}`));
+      }
+      body.appendChild(list);
+    }
+
     const table = el('table');
     const head = el('tr');
     for (const h of ['Document', 'Role', 'Filed as', 'Notes']) head.appendChild(el('th', null, h));
@@ -874,7 +1140,10 @@ function showResult(item) {
       tr.appendChild(el('td', null, inv.file));
       tr.appendChild(el('td', null, inv.role || '—'));
       tr.appendChild(el('td', null, inv.expense_type || '—'));
-      const note = el('td', null, (inv.errors && inv.errors.join('; ')) || (inv.moved_to_output ? 'OK' : 'left in inbox'));
+      const outcome = (inv.errors && inv.errors.join('; ')) || (inv.moved_to_output ? 'OK' : 'left in inbox');
+      // A document that only went in on the third try is worth knowing about,
+      // whether or not it eventually worked.
+      const note = el('td', null, inv.attempts > 1 ? `${outcome} · ${inv.attempts} attempts` : outcome);
       const d = inv.error_detail;
       if (d) {
         if (d.hint) note.appendChild(el('div', 'failure-hint', d.hint));
@@ -897,14 +1166,7 @@ function showResult(item) {
     }
     body.appendChild(table);
   }
-
-  $('#result-open-folder').onclick = () => window.rejsudai.shell.openPath(item.outputFolder);
-  $('#result-open-folder').disabled = !item.outputFolder;
-  $('#result-open-manifest').onclick = () => window.rejsudai.shell.openPath(item.manifestPath);
-  $('#result-open-manifest').disabled = !item.manifestPath;
-  $('#result-modal').hidden = false;
 }
-$('#result-close').addEventListener('click', () => ($('#result-modal').hidden = true));
 $('#btn-totp-help').addEventListener('click', () => ($('#totp-help-modal').hidden = false));
 $('#totp-help-close').addEventListener('click', () => ($('#totp-help-modal').hidden = true));
 
@@ -927,6 +1189,8 @@ async function loadSettings() {
   const s = await window.rejsudai.settings.get();
   for (const [key, id] of Object.entries(SETTING_FIELDS)) $(`#${id}`).value = s[key] ?? '';
   $('#s-headless').checked = !!s.headless;
+  $('#s-ask').checked = s.askOnFailure !== false;
+  $('#s-ask-timeout').value = s.askTimeoutSeconds ?? 300;
   applyTheme(s.theme);
   $('#s-submit-confirm').checked = !s.submitConfirmSuppressed;
   setSubmitOption(s.submitAfterFiling, { persist: false });
@@ -1029,6 +1293,8 @@ $('#btn-save-aliases').addEventListener('click', async () => {
 $('#btn-save-settings').addEventListener('click', async () => {
   const patch = {
     headless: $('#s-headless').checked,
+    askOnFailure: $('#s-ask').checked,
+    askTimeoutSeconds: Number($('#s-ask-timeout').value),
     submitConfirmSuppressed: !$('#s-submit-confirm').checked,
   };
   for (const [key, id] of Object.entries(SETTING_FIELDS)) patch[key] = $(`#${id}`).value.trim();

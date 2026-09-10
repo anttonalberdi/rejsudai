@@ -56,6 +56,8 @@ function createWindow() {
   });
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
   win.once('ready-to-show', () => win.show());
+  // Looking at the window is the whole point of the bouncing.
+  win.on('focus', () => callForAttention(false));
   win.on('closed', () => (win = null));
 
   // Closing the window ends the run (there would be nothing left to watch it),
@@ -96,7 +98,28 @@ runner.on('log', p => send('run:log', p));
 runner.on('progress', p => send('run:progress', p));
 runner.on('settlement', p => send('run:settlement', p));
 runner.on('state', p => send('run:state', p));
-runner.on('totp-request', p => send('run:totp-request', p));
+// A question stops the run dead, and the window holding it may well be behind
+// something else — a run is watched out of the corner of an eye, if at all. So
+// the app asks for attention until it is looked at, rather than waiting in
+// silence for an answer nobody knows is wanted.
+let bounceId = null;
+function callForAttention(wanted) {
+  if (!win || win.isDestroyed()) return;
+  if (wanted && !win.isFocused()) {
+    // 'critical' keeps bouncing until the app is activated — which is the
+    // truth here: nothing else happens until someone answers.
+    if (process.platform === 'darwin' && app.dock) bounceId = app.dock.bounce('critical');
+    else win.flashFrame(true);
+    return;
+  }
+  if (process.platform === 'darwin' && app.dock && bounceId !== null) app.dock.cancelBounce(bounceId);
+  else win.flashFrame(false);
+  bounceId = null;
+}
+
+runner.on('totp-request', p => { send('run:totp-request', p); callForAttention(true); });
+runner.on('ask', p => { send('run:ask', p); callForAttention(true); });
+runner.on('ask-close', p => { send('run:ask-close', p); callForAttention(false); });
 // Live browser frames: base64 JPEG, several per second while a run is on.
 runner.on('frame', p => send('run:frame', p));
 runner.on('frame-end', p => send('run:frame-end', p));
@@ -205,6 +228,7 @@ ipcMain.handle('run:cancel', () => {
 });
 ipcMain.handle('run:state', () => runner.state());
 ipcMain.handle('run:totp', (_e, code) => runner.submitTotp(code));
+ipcMain.handle('run:answer', (_e, payload) => runner.answerAsk(payload && payload.id, payload && payload.answer));
 
 ipcMain.handle('browser:status', () => browsers.status());
 ipcMain.handle('browser:install', async () => {
