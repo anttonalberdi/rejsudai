@@ -25,16 +25,35 @@ values into the Keychain. `.env` is gitignored.
 npm run dist
 ```
 
-Produces `dist/Rejsudai-<version>-arm64.dmg` (~135 MB) and
-`dist/mac-arm64/Rejsudai.app`. Chromium is *not* in there — the app downloads it on
-first run — so the build needs no Playwright browsers.
+Produces **two** `.dmg`s, one per Mac architecture — Chromium is *not* in
+either (the app downloads it on first run), so the build needs no Playwright
+browsers:
+
+| Artifact | For | Unpacked app |
+|---|---|---|
+| `dist/Rejsudai-<version>-arm64.dmg` (~130 MB) | Apple silicon (M1 and later) | `dist/mac-arm64/Rejsudai.app` |
+| `dist/Rejsudai-<version>-x64.dmg` (~134 MB) | Intel (e.g. a Core i9 MacBook Pro) | `dist/mac/Rejsudai.app` |
+
+Both are cross-buildable from either kind of Mac: nothing here compiles
+natively — the runtime dependencies (Playwright, `heic-convert`'s WASM libheif,
+`otpauth`, the Anthropic SDK) are pure JS, so electron-builder only has to fetch
+the matching Electron binary. Building on one architecture and running the other
+`.dmg` is fine.
+
+The `-x64` suffix is not electron-builder's default (it drops `${arch}` for x64
+and would ship a bare `Rejsudai-<version>.dmg`), so `dmg.artifactName` in
+`package.json` sets the pattern explicitly. Naming the architecture matters here:
+the two files sit side by side on the release page and only the name tells them
+apart. Dropping an Intel `.dmg` on an Apple-silicon Mac still works — Rosetta
+runs it — but it is slower and downloads a second Chromium.
 
 ### Releasing through GitHub Actions
 
-[`.github/workflows/release.yml`](.github/workflows/release.yml) builds the
-`.dmg` on a `macos-latest` (Apple silicon) runner and uploads it to the release
-whenever one is **published**. It needs no secrets: there is nothing to compile
-natively, no Chromium to fetch, and the build is unsigned.
+[`.github/workflows/release.yml`](.github/workflows/release.yml) builds **both**
+`.dmg`s on a `macos-latest` (Apple silicon) runner — the x64 one as a cross-build
+— and uploads them to the release whenever one is **published**. It needs no
+secrets: there is nothing to compile natively, no Chromium to fetch, and the
+build is unsigned.
 
 `npm run dist` passes `--publish never`, and has to. On a checkout that has the
 release tag on it, electron-builder otherwise decides to publish the artifacts
@@ -43,7 +62,8 @@ a perfectly good `.dmg`. Uploading is the workflow's last step
 (`gh release upload`), not electron-builder's job.
 
 The workflow rewrites `package.json`'s version from the tag name before building
-(not committed back), so tagging `v1.0.1` produces `Rejsudai-1.0.1-arm64.dmg`.
+(not committed back), so tagging `v1.0.1` produces `Rejsudai-1.0.1-arm64.dmg` and
+`Rejsudai-1.0.1-x64.dmg`; `gh release upload dist/*.dmg` takes both.
 `workflow_dispatch` rebuilds an existing release by hand.
 
 The README does not name a version or a filename anywhere — it links to

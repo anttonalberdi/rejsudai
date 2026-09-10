@@ -11,14 +11,22 @@ you watch it happen in the window.
 
 No terminal. No setup beyond filling in your credentials once.
 
-**[⬇︎ Download the latest version](https://github.com/anttonalberdi/rejsudai/releases/latest)** — a `.dmg` for Macs with Apple silicon (M1 and later).
+**[⬇︎ Download the latest version](https://github.com/anttonalberdi/rejsudai/releases/latest)** — for any Mac: `-arm64.dmg` for Apple silicon (M1 and later), `-x64.dmg` for Intel.
 
 ---
 
 ## Installing
 
-1. Download `Rejsudai-<version>-arm64.dmg` from the
-   [latest release](https://github.com/anttonalberdi/rejsudai/releases/latest).
+1. Download the `.dmg` for your Mac from the
+   [latest release](https://github.com/anttonalberdi/rejsudai/releases/latest):
+
+   | Your Mac | File |
+   |---|---|
+   | Apple silicon — M1, M2, M3, M4 | `Rejsudai-<version>-arm64.dmg` |
+   | Intel — e.g. a Core i9 MacBook Pro | `Rejsudai-<version>-x64.dmg` |
+
+   Not sure which you have?  → **About This Mac**: the *Chip* line says
+   Apple M-something, the *Processor* line says Intel.
 2. Open it and drag **Rejsudai** into your Applications folder.
 3. The app is not signed with an Apple developer certificate, so macOS will
    refuse to open it the first time — possibly saying it is *damaged*. It isn't.

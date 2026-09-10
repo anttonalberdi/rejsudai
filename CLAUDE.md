@@ -14,6 +14,14 @@
 
 Playwright + Claude API automation that logs into **indfak2.dk** (KU's indfak2 expense system), creates expense report drafts, matches card transactions, and attaches invoice PDFs.
 
+## Repository conventions
+
+**Authorship.** Every commit and pull request in this repository is authored by
+`anttonalberdi` alone. Do not add a `Co-Authored-By:` trailer, a "Generated with"
+line, or any other mention of Claude, Claude Code or Anthropic to a commit
+message, a PR description, or a release note — regardless of who or what wrote
+the change.
+
 ## Quick start
 
 ```bash

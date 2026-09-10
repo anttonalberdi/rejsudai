@@ -16,8 +16,10 @@ permissions:
 
 jobs:
   dmg:
-    # macos-latest is Apple silicon — the .dmg is arm64 either way (the target
-    # is pinned in package.json), but building on arm64 keeps it honest.
+    # Two .dmgs come out of one run: arm64 (Apple silicon) and x64 (Intel).
+    # macos-latest is Apple silicon; the x64 build is a cross-build, which is
+    # safe here because nothing is compiled natively — electron-builder just
+    # downloads the x64 Electron and packs the same pure-JS node_modules.
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -35,8 +37,8 @@ jobs:
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
 
-      # electron-builder names the .dmg after package.json's version; take it
-      # from the tag so the asset matches the release.
+      # electron-builder names the .dmgs after package.json's version; take it
+      # from the tag so the assets match the release.
       - name: Sync version to the release tag
         run: |
           TAG="${{ github.event.release.tag_name || inputs.tag }}"
@@ -53,7 +55,9 @@ jobs:
           # electron-builder from hunting for a keychain identity in CI.
           CSC_IDENTITY_AUTO_DISCOVERY: false
 
-      - name: Upload the .dmg to the release
+      # Both architectures at once: dist/ holds Rejsudai-<version>-arm64.dmg and
+      # Rejsudai-<version>-x64.dmg.
+      - name: Upload the .dmgs to the release
         run: gh release upload "$TAG" dist/*.dmg --clobber
         env:
           GH_TOKEN: ${{ github.token }}

@@ -10,7 +10,8 @@ it.
 
 **Cutting a release.** Don't edit `package.json` — publish a GitHub release on a
 `vX.Y.Z` tag and [`.github/workflows/release.yml`](.github/workflows/release.yml)
-takes the version from the tag, builds `Rejsudai-X.Y.Z-arm64.dmg` and uploads it.
+takes the version from the tag, builds `Rejsudai-X.Y.Z-arm64.dmg` and
+`Rejsudai-X.Y.Z-x64.dmg`, and uploads both.
 Before tagging, close off the section below by giving it the release date, add a
 fresh `## [Unreleased]` above it, and add the tag's link at the foot of this
 file.
@@ -19,7 +20,22 @@ file.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **Intel Macs are supported.** A release now carries two `.dmg`s — the existing
+  `Rejsudai-<version>-arm64.dmg` for Apple silicon and a new
+  `Rejsudai-<version>-x64.dmg` for Intel Macs (an 8-core Core i9 MacBook Pro,
+  say). `npm run dist` builds both from either kind of Mac: nothing in the app
+  compiles natively, so electron-builder only fetches the matching Electron
+  binary. The release workflow uploads both from its one Apple-silicon runner.
+
+### Changed
+
+- `dmg.artifactName` is set explicitly so the Intel `.dmg` is named `-x64`;
+  electron-builder's default drops the architecture for x64 and would have
+  shipped an unlabelled `Rejsudai-<version>.dmg` next to the arm64 one.
+- README's download section now names both files and how to tell which Mac you
+  have.
 
 ---
 

@@ -54,7 +54,8 @@
         {
           "target": "dmg",
           "arch": [
-            "arm64"
+            "arm64",
+            "x64"
           ]
         }
       ],
@@ -67,7 +68,8 @@
       "identity": null
     },
     "dmg": {
-      "title": "Rejsudai ${version}"
+      "title": "Rejsudai ${version}",
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
     }
   }
 }
