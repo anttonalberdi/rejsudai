@@ -8,6 +8,7 @@ const settingsStore = require('./lib/settings');
 const credentials = require('./lib/credentials');
 const inbox = require('./lib/inbox');
 const browsers = require('./lib/browsers');
+const updates = require('./lib/updates');
 const runner = require('./lib/runner');
 
 let win = null;
@@ -159,21 +160,38 @@ ipcMain.handle('inbox:propose', (_e, payload) => inbox.propose(settingsStore.rea
 ipcMain.handle('inbox:expand', (_e, paths) => inbox.expand(paths || []));
 ipcMain.handle('inbox:create', (_e, payload) => inbox.create(settingsStore.read().receiptsInbox, payload || {}));
 
-// Removing a saved settlement deletes real files, so the confirmation is a
-// native dialog here rather than something the renderer could skip.
+// Continuing a settlement: new receipts go into its input/, and the next run
+// files them into the same draft. Not while that settlement is in the run —
+// it decides what to file from what is in input/ when it starts.
+ipcMain.handle('inbox:addFiles', (_e, { folderPath, files } = {}) => {
+  const state = runner.state();
+  const inRun = runner.busy && [state.currentId, ...state.queued].includes(folderPath);
+  if (inRun) throw new Error('This settlement is being filed right now — add the receipts once the run has finished.');
+  return inbox.addFiles(settingsStore.read().receiptsInbox, folderPath, files || []);
+});
+
+// Removing a settlement deletes real files, so the confirmation is a native
+// dialog here rather than something the renderer could skip.
 ipcMain.handle('inbox:remove', async (_e, folderPath) => {
   if (runner.busy) throw new Error('A settlement run is in progress — wait for it to finish.');
   const info = inbox.describeFolder(folderPath);
-  const files = `${info.fileCount} receipt${info.fileCount === 1 ? '' : 's'}`;
+  const count = (n, what) => `${n} ${what}${n === 1 ? '' : 's'}`;
+  // A settlement that has been filed is also the only local record of what
+  // went into its draft, which is worth saying before it goes.
+  const filed = info.processedCount > 0 || !!info.record;
+  const contents = filed
+    ? `Its folder is deleted: ${count(info.processedCount, 'filed receipt')}, ` +
+      `${count(info.fileCount, 'receipt')} still waiting to be filed, and the record of what went into the draft (manifest.json).`
+    : `Its folder and the ${count(info.fileCount, 'receipt')} copied into it are deleted.`;
   const { response } = await dialog.showMessageBox(win, {
     type: 'warning',
     buttons: ['Cancel', 'Delete settlement'],
     defaultId: 0,
     cancelId: 0,
-    message: `Delete the saved settlement “${info.settlementName || info.folder}”?`,
+    message: `Delete the settlement “${info.settlementName || info.folder}”?`,
     detail:
-      `Its inbox folder and the ${files} copied into it are deleted. The originals you dropped in are ` +
-      'untouched, and so is any draft already created in indfak2 — delete that in indfak2 itself.',
+      `${contents} The originals you added are untouched, and so is anything in indfak2 — ` +
+      'a draft, or a settlement already sent, stays there until you delete it in indfak2 itself.',
   });
   if (response !== 1) return { removed: false, cancelled: true };
   return inbox.remove(settingsStore.read().receiptsInbox, folderPath);
@@ -234,6 +252,15 @@ ipcMain.handle('browser:status', () => browsers.status());
 ipcMain.handle('browser:install', async () => {
   await browsers.install(line => send('browser:progress', { line }));
   return browsers.status();
+});
+
+// The renderer is deliberately denied network access. It asks here for one
+// small public GitHub request at startup, and this side opens the matching
+// release artifact in the user's normal browser when the badge is clicked.
+ipcMain.handle('updates:check', () => updates.check(app.getVersion()));
+ipcMain.handle('updates:open', (_e, url) => {
+  if (!updates.isReleaseDownloadUrl(url)) throw new Error('That is not a Rejsudai release download.');
+  return shell.openExternal(url);
 });
 
 ipcMain.handle('manifest:read', (_e, manifestPath) => {

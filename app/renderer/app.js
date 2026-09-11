@@ -11,7 +11,7 @@ const el = (tag, cls, text) => {
   return node;
 };
 
-// id -> { ...settlement, status, error, manifestPath, outputFolder, manifest, selected }
+// id -> { ...settlement (see inbox.describeFolder), status, error, failure, manifest, selected }
 const items = new Map();
 let running = false;
 
@@ -235,21 +235,45 @@ function aliasLabel(code) {
 // sitting there waiting to be sent. A filed settlement is **Ready** — the draft
 // is complete and the approval is yours to press — and one that went out on its
 // own is **Submitted**.
+//
+// A settlement is a folder that lives on after it is filed, so where it stands
+// is read off the folder rather than remembered: its record (manifest.json)
+// says whether it has a draft and whether that was sent, and its input/ says
+// whether anything is still waiting to go in.
 function statusLabel(s) {
-  return { queued: 'Queued', running: 'Running', done: 'Ready', submitted: 'Submitted',
-           error: 'Failed', cancelled: 'Cancelled' }[s] || 'Not filed';
+  return { queued: 'Queued', partial: 'Partly filed', running: 'Running', done: 'Ready',
+           submitted: 'Submitted', error: 'Failed', cancelled: 'Cancelled', empty: 'Empty' }[s] || 'Not filed';
 }
 
 // The chip is two words at most, so the distinction it is drawing is spelled
 // out where there is room for it.
 const STATUS_HINT = {
-  done: 'Filed as a draft in indfak2 — ready for you to send for approval',
+  done: 'Every receipt is filed in its indfak2 draft — ready for you to send for approval',
+  partial: 'It has a draft in indfak2, and receipts waiting to go into it — process it to file them',
   submitted: 'Sent to indfak2 for approval',
   error: 'This settlement did not file — see the Details tab',
   cancelled: 'The run was stopped before this settlement finished',
   running: 'Being filed into indfak2 now',
   queued: 'Waiting to be filed',
+  empty: 'No receipts yet — add some to file it',
 };
+
+// Where a settlement stands according to its folder.
+function diskStatus(s) {
+  const record = s.record && !s.record.unreadable ? s.record : null;
+  if (record && record.submitted) return 'submitted';
+  if (s.fileCount > 0) return s.record ? 'partial' : 'queued';
+  if (s.record || s.processedCount > 0) return 'done';
+  return 'empty';
+}
+
+// Something to file, and a settlement that can still take it.
+const canProcess = item => item.fileCount > 0 && !(item.record && item.record.submitted);
+const canAddTo = item => !(item.record && item.record.submitted);
+// In the run now, or queued for it: its input/ is spoken for until it finishes.
+// The ids come from the runner's own state (see setRunning).
+let runIds = new Set();
+const inRun = item => running && runIds.has(item.id);
 
 // A trash can, drawn rather than shipped as an asset: lid, handle, body and two
 // score lines. createElementNS because SVG is not HTML — document.createElement
@@ -338,26 +362,24 @@ function render() {
       openDetails(item);
     });
 
-    // A settlement saved but not yet filed is only its inbox folder, so
-    // removing it deletes that folder. One whose folder the automation already
-    // consumed is just a row left for its result — that only leaves the list.
-    const onDisk = item.onDisk !== false;
+    // A settlement is its folder, so removing it deletes that folder — the
+    // receipts in it, filed or not, and the record of what was filed.
     const rm = el('button', 'settlement-del');
     rm.appendChild(trashIcon());
-    rm.title = item.removing ? 'Removing…'
-      : onDisk
-        ? 'Delete this settlement and the receipts copied into its inbox folder'
-        : 'Take this finished settlement off the list';
+    rm.title = item.removing ? 'Removing…' : 'Delete this settlement and its folder';
     rm.setAttribute('aria-label', rm.title);
     rm.disabled = running || !!item.removing;
     if (item.removing) rm.classList.add('is-busy');
     rm.addEventListener('click', () => removeSettlement(item));
     li.appendChild(rm);
 
+    // Only a settlement with something to file can be processed: one that is
+    // Ready has nothing waiting, and a submitted one can take nothing more.
     const box = el('input');
     box.type = 'checkbox';
-    box.checked = !!item.selected;
-    box.disabled = running;
+    box.checked = !!item.selected && canProcess(item);
+    box.disabled = running || !canProcess(item);
+    box.title = canProcess(item) ? '' : 'Nothing waiting to be filed — add receipts to process it again';
     box.addEventListener('change', () => {
       item.selected = box.checked;
       syncSelection();
@@ -368,23 +390,58 @@ function render() {
     main.appendChild(el('div', 'settlement-name', item.settlementName || item.folder));
     const bits = [];
     if (item.alias) bits.push(`alias ${aliasLabel(item.alias)}`);
-    bits.push(`${item.fileCount} file${item.fileCount === 1 ? '' : 's'}`);
+    const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+    const filedBefore = item.processedCount > 0 || !!item.record;
+    if (item.fileCount) bits.push(filedBefore ? `${item.fileCount} to file` : plural(item.fileCount, 'file'));
+    if (item.processedCount) bits.push(`${item.processedCount} filed`);
+    if (item.record && item.record.settlementNumber) bits.push(`no. ${item.record.settlementNumber}`);
     bits.push(item.folder);
     main.appendChild(el('div', 'settlement-meta', bits.join(' · ')));
 
     const actions = el('div', 'settlement-actions');
-    if (item.outputFolder) {
-      const b = el('button', 'btn btn-quiet', 'Open output folder');
-      b.addEventListener('click', () => window.rejsudai.shell.openPath(item.outputFolder));
+    if (canAddTo(item)) {
+      const b = el('button', 'btn btn-quiet', 'Add receipts…');
+      b.title = filedBefore
+        ? 'Add receipts to this settlement — processing it again files them into the same draft'
+        : 'Add more receipts to this settlement';
+      b.disabled = inRun(item);
+      b.addEventListener('click', async () => {
+        const paths = await window.rejsudai.dialog.pickFiles({ title: `Add receipts to ${item.settlementName || item.folder}` });
+        await addReceipts(item, paths || []);
+      });
       actions.appendChild(b);
     }
+    const open = el('button', 'btn btn-quiet', 'Open folder');
+    open.title = 'The settlement folder: input/ holds what is waiting, processed/ what is filed';
+    open.addEventListener('click', () => window.rejsudai.shell.openPath(item.path));
+    actions.appendChild(open);
     if (item.manifestPath) {
       const b = el('button', 'btn btn-quiet', 'manifest.json');
       b.addEventListener('click', () => window.rejsudai.shell.openPath(item.manifestPath));
       actions.appendChild(b);
     }
-    if (actions.childNodes.length) main.appendChild(actions);
+    main.appendChild(actions);
     li.appendChild(main);
+
+    // Receipts dropped on a settlement are added to it, the same as the button.
+    if (canAddTo(item)) {
+      li.addEventListener('dragover', event => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (!inRun(item)) li.classList.add('is-drop');
+      });
+      li.addEventListener('dragleave', event => {
+        if (!li.contains(event.relatedTarget)) li.classList.remove('is-drop');
+      });
+      li.addEventListener('drop', async event => {
+        event.preventDefault();
+        event.stopPropagation();
+        li.classList.remove('is-drop');
+        if (inRun(item)) return;
+        const paths = [...event.dataTransfer.files].map(f => window.rejsudai.pathForFile(f)).filter(Boolean);
+        await addReceipts(item, paths);
+      });
+    }
 
     const status = el('span', 'status', statusLabel(item.status));
     if (item.status) status.dataset.status = item.status;
@@ -397,12 +454,12 @@ function render() {
 }
 
 function selected() {
-  return [...items.values()].filter(i => i.selected);
+  return [...items.values()].filter(i => i.selected && canProcess(i));
 }
 
 function syncSelection() {
   const sel = selected();
-  const all = [...items.values()];
+  const all = [...items.values()].filter(canProcess);
   $('#selection-summary').textContent = sel.length
     ? `${sel.length} of ${all.length} selected`
     : all.length
@@ -417,7 +474,7 @@ function syncSelection() {
 }
 
 $('#select-all').addEventListener('change', e => {
-  for (const item of items.values()) item.selected = e.target.checked;
+  for (const item of items.values()) item.selected = e.target.checked && canProcess(item);
   render();
 });
 
@@ -435,32 +492,29 @@ async function scanInbox() {
   items.clear();
   for (const s of res.settlements) {
     const before = previous.get(s.id);
-    // A folder that is still on disk after a failed run keeps its result, but
-    // its file count is refreshed — processed files have already been moved out.
-    items.set(s.id, before && (before.status === 'done' || before.status === 'error')
-      ? { ...before, ...s, selected: false, status: before.status, onDisk: true }
-      : { ...s, selected: true, status: 'queued', onDisk: true });
-  }
-  // Finished settlements whose folder bot.js has already deleted stay listed so
-  // their results remain reachable. onDisk: false marks them as rows only —
-  // removing one takes it off the list instead of deleting anything.
-  for (const [id, item] of previous) {
-    if (items.has(id)) continue;
-    if (item.status === 'done' || item.status === 'error') items.set(id, { ...item, selected: false, onDisk: false });
+    // Where it stands comes from its folder. A failure or a cancellation from
+    // this session is the exception: the folder cannot say what went wrong,
+    // and the Details tab still has to.
+    const keep = before && ['error', 'cancelled'].includes(before.status);
+    const item = keep
+      ? { ...before, ...s, status: before.status }
+      : { ...s, status: diskStatus(s), error: null, failure: null };
+    // The record may have moved since it was last read (a run, or a record
+    // written by a CLI run): read it again when Details next needs it.
+    item.manifest = before && before.record && s.record && before.record.updatedAt === s.record.updatedAt
+      ? before.manifest : null;
+    // New in the list: selected if there is anything to file, as a pending
+    // settlement always was. Already listed: left as the user had it.
+    item.selected = canProcess(item) && (before ? !!before.selected : true);
+    items.set(s.id, item);
   }
   render();
 }
 
-// Removing a saved settlement: the confirmation is a native dialog raised by the
-// main process, which is also what deletes the folder — the renderer only asks.
+// Removing a settlement: the confirmation is a native dialog raised by the main
+// process, which is also what deletes the folder — the renderer only asks.
 async function removeSettlement(item) {
   if (running || item.removing) return;
-  if (item.onDisk === false) {
-    items.delete(item.id);
-    if (detailsFor === item.id) detailsFor = null;
-    render();
-    return;
-  }
   // The confirmation is a sheet on the window, so a second click while it is
   // open would queue a second one behind it.
   item.removing = true;
@@ -473,7 +527,7 @@ async function removeSettlement(item) {
     appendLog(
       res && res.missing
         ? `The folder for "${item.settlementName || item.folder}" was already gone — taken off the list.\n`
-        : `Removed the settlement "${item.settlementName || item.folder}" and its inbox folder.\n`,
+        : `Removed the settlement "${item.settlementName || item.folder}" and its folder.\n`,
       'app'
     );
   } catch (err) {
@@ -482,6 +536,31 @@ async function removeSettlement(item) {
     item.removing = false;
     render();
   }
+}
+
+// Continuing a settlement: the receipts are copied into its input/, and the
+// next run files them into the draft it already has. One identical to a
+// receipt already in the settlement is left out, and said so.
+async function addReceipts(item, paths) {
+  if (!paths.length) return;
+  const name = item.settlementName || item.folder;
+  try {
+    const { settlement, added, skipped } = await window.rejsudai.inbox.addFiles(item.path, paths);
+    Object.assign(item, settlement, {
+      status: diskStatus(settlement), error: null, failure: null, manifest: null,
+      // Receipts were added so that they get filed: line it up for Process.
+      selected: added.length ? canProcess(settlement) : item.selected,
+    });
+    if (added.length) {
+      appendLog(`Added ${added.length} receipt${added.length === 1 ? '' : 's'} to "${name}": ${added.join(', ')}\n`, 'app');
+    }
+    if (skipped.length) {
+      alertMsg(`Not added to "${name}": ${skipped.map(s => `${s.name} (${s.reason})`).join(', ')}`);
+    }
+  } catch (err) {
+    alertMsg(clean(err));
+  }
+  render();
 }
 
 /* -------------------------------------------------------------- running -- */
@@ -507,9 +586,8 @@ $('#btn-process').addEventListener('click', async () => {
     t.status = 'queued';
     t.error = null;
     t.failure = null;
+    // The run rewrites the record; what is cached of it is about to be stale.
     t.manifest = null;
-    t.manifestPath = null;
-    t.outputFolder = null;
   }
   render();
   try {
@@ -519,7 +597,7 @@ $('#btn-process').addEventListener('click', async () => {
     );
     // Declining the submit confirmation starts nothing — put the rows back.
     if (state && state.cancelled) {
-      for (const t of targets) t.status = 'pending';
+      for (const t of targets) t.status = diskStatus(t);
       render();
     }
   } catch (err) {
@@ -536,9 +614,10 @@ $('#btn-cancel').addEventListener('click', () => {
 let wasRunning = false;
 function setRunning(state) {
   running = state.busy;
+  runIds = new Set([state.currentId, ...(state.queued || [])].filter(Boolean));
   if (!wasRunning && running) showPane('browser');
-  // A finished batch changes the inbox: processed folders are gone, partly
-  // processed ones have fewer files left.
+  // A finished batch changes the settlements: what was filed has moved to
+  // processed/, and each record says where its settlement now stands.
   if (wasRunning && !running) {
     scanInbox();
     const failed = [...items.values()].find(i => i.status === 'error');
@@ -587,17 +666,27 @@ window.rejsudai.onProgress(p => {
 window.rejsudai.onSettlement(async p => {
   const item = items.get(p.id);
   if (!item) return;
-  // A settlement that actually left for approval says so, rather than reading
-  // like every other finished run.
-  const submitted = !!(p.manifest && p.manifest.settlement && p.manifest.settlement.submit
-    && p.manifest.settlement.submit.submitted);
-  item.status = p.status === 'done' && submitted ? 'submitted' : p.status;
+  item.status = p.status;
   item.error = p.error || null;
   item.failure = p.failure || null;
   if (p.manifestPath) item.manifestPath = p.manifestPath;
-  if (p.outputFolder) item.outputFolder = p.outputFolder;
   if (p.manifest) item.manifest = p.manifest;
   if (p.status !== 'running') item.selected = false;
+  render();
+  if (p.status === 'running' || p.status === 'queued') return;
+  // The run has moved files and rewritten the record. A clean finish is
+  // described by the folder — Ready, Partly filed or Submitted — while a
+  // failure keeps its own status, with the counts brought up to date.
+  try {
+    const now = await window.rejsudai.inbox.describe(item.path);
+    Object.assign(item, now, {
+      status: p.status === 'done' ? diskStatus(now) : p.status,
+      manifest: p.manifest || null,
+      selected: false,
+    });
+  } catch {
+    // The folder cannot be read: the next scan says so.
+  }
   render();
 });
 
@@ -815,7 +904,7 @@ async function refreshCompose() {
     preview.textContent = answer.error;
     preview.className = 'hint hint-warn';
   } else if (answer.exists) {
-    preview.textContent = `A settlement folder "${answer.folder}" already exists — choose another name.`;
+    preview.textContent = `A settlement folder "${answer.folder}" already exists — choose another name, or add the receipts to that settlement from the list.`;
     preview.className = 'hint hint-warn';
   } else {
     preview.textContent = `Draft "* ${answer.settlementName}" · folder ${answer.folder}`;
@@ -872,7 +961,7 @@ $('#btn-save-new').addEventListener('click', async () => {
   const created = await createFromCompose(btn);
   if (!created) return;
 
-  items.set(created.id, { ...created, selected: true, status: 'queued', onDisk: true });
+  items.set(created.id, { ...created, selected: true, status: diskStatus(created) });
   showView('run');
   render();
   flash('#new-msg', '', '');
@@ -890,7 +979,7 @@ $('#btn-run-new').addEventListener('click', async () => {
   // Show it in the list as the one thing about to run, then hand it to the runner:
   // its status becomes "Running" as soon as bot.js is spawned.
   for (const item of items.values()) item.selected = false;
-  items.set(created.id, { ...created, selected: true, status: 'queued', onDisk: true });
+  items.set(created.id, { ...created, selected: true, status: diskStatus(created) });
   showView('run');
   render();
 
@@ -902,7 +991,7 @@ $('#btn-run-new').addEventListener('click', async () => {
     // Declining the submit confirmation leaves the folder saved but unrun.
     if (state && state.cancelled) {
       const item = items.get(created.id);
-      if (item) item.status = 'pending';
+      if (item) item.status = diskStatus(item);
       render();
     }
     flash('#new-msg', '', '');
@@ -1048,9 +1137,25 @@ window.rejsudai.onAskClose(hideAsk);
 
 /* --------------------------------------------------------- details pane -- */
 // Everything known about one settlement: what went wrong if something did, then
-// what was filed, what was asked, and where each document ended up. Reads from
-// `items`, not from a captured argument, so it can be re-run whenever the
-// settlement changes underneath it.
+// what is filed, what is waiting, what was asked, and where each document
+// ended up — across every run that has filed into it. Reads from `items`, not
+// from a captured argument, so it can be re-run whenever the settlement changes
+// underneath it.
+//
+// The record is read when the pane needs it rather than with every scan: it
+// carries every prompt Claude was sent, and a list of settlements does not.
+function loadManifest(item) {
+  if (!item.manifestPath || item.manifest || item.manifestLoading) return;
+  item.manifestLoading = true;
+  window.rejsudai.manifest.read(item.manifestPath)
+    .then(m => { item.manifest = m && !m.error ? m : { error: (m && m.error) || 'unreadable' }; })
+    .catch(err => { item.manifest = { error: clean(err) }; })
+    .finally(() => {
+      item.manifestLoading = false;
+      if (detailsFor === item.id) renderDetails();
+    });
+}
+
 function renderDetails() {
   const item = detailsFor && items.get(detailsFor);
   const title = $('#details-title');
@@ -1059,9 +1164,9 @@ function renderDetails() {
 
   const folderBtn = $('#details-open-folder');
   const manifestBtn = $('#details-open-manifest');
-  folderBtn.onclick = () => item && window.rejsudai.shell.openPath(item.outputFolder);
+  folderBtn.onclick = () => item && window.rejsudai.shell.openPath(item.path);
   manifestBtn.onclick = () => item && window.rejsudai.shell.openPath(item.manifestPath);
-  folderBtn.disabled = !(item && item.outputFolder);
+  folderBtn.disabled = !item;
   manifestBtn.disabled = !(item && item.manifestPath);
 
   if (!item) {
@@ -1077,95 +1182,151 @@ function renderDetails() {
   // The failure comes first: it is the reason the pane was opened.
   if (item.error) body.appendChild(failureBlock(item));
 
-  const m = item.manifest;
+  loadManifest(item);
+  const m = item.manifest && !item.manifest.error ? item.manifest : null;
+  const waiting = item.files || [];
+  const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
   if (!m || !m.settlement) {
-    body.appendChild(el('p', 'subtle', item.error
-      ? 'No manifest was written for this run.'
-      : item.status === 'running'
-        ? 'This settlement is being filed. Its result appears here when the run finishes.'
-        : 'This settlement has not been filed yet.'));
-  } else {
-    const s = m.settlement;
-    const tallies = el('div', 'tallies');
-    const tally = (n, label) => {
-      const wrap = el('div');
-      wrap.appendChild(el('span', 'tally-n', String(n)));
-      wrap.appendChild(el('span', 'tally-l', label));
-      return wrap;
-    };
-    tallies.appendChild(tally(s.expenses_card ?? 0, 'card lines'));
-    tallies.appendChild(tally(s.expenses_normal_cost ?? 0, 'normal cost'));
-    tallies.appendChild(tally(s.expenses_unprocessed ?? 0, 'unprocessed'));
-    body.appendChild(tallies);
-
-    const meta = el('p', 'subtle');
-    meta.textContent = `Draft "${s.draft_name}"${s.settlement_number ? ` · no. ${s.settlement_number}` : ''} · ${s.status}`;
-    body.appendChild(meta);
-
-    // Only worth a line when submitting was asked for: otherwise "draft" is the
-    // expected outcome and s.status already says it.
-    const sub = s.submit;
-    if (sub && sub.requested) {
-      const line = el('p', sub.submitted ? 'msg ok' : 'msg err');
-      line.textContent = sub.submitted
-        ? 'Sent for approval.'
-        : `Not submitted — ${sub.skipped_reason || sub.errors.join(' | ') || 'reason unknown'}. It is still a draft in indfak2.`;
-      body.appendChild(line);
-    }
-
-    // A settlement somebody steered by hand is not the same kind of result as
-    // one the automation reached on its own, so the questions it was asked —
-    // and what was answered — are part of what happened. 2FA is left out: it is
-    // asked of every run and says nothing about this one.
-    const asked = (s.questions || []).filter(q => q.kind !== 'totp');
-    if (asked.length) {
-      body.appendChild(el('p', 'subtle', asked.length === 1
-        ? 'One question was asked during this run:'
-        : `${asked.length} questions were asked during this run:`));
-      const list = el('ul', 'steps');
-      for (const q of asked) {
-        list.appendChild(el('li', null,
-          `${q.question} → ${q.label || q.answer}${q.answered ? '' : ' (nobody answered — the default was taken)'}`));
-      }
-      body.appendChild(list);
-    }
-
-    const table = el('table');
-    const head = el('tr');
-    for (const h of ['Document', 'Role', 'Filed as', 'Notes']) head.appendChild(el('th', null, h));
-    table.appendChild(head);
-    for (const inv of m.invoices || []) {
-      const tr = el('tr');
-      if (inv.errors && inv.errors.length) tr.className = 'result-row-err';
-      tr.appendChild(el('td', null, inv.file));
-      tr.appendChild(el('td', null, inv.role || '—'));
-      tr.appendChild(el('td', null, inv.expense_type || '—'));
-      const outcome = (inv.errors && inv.errors.join('; ')) || (inv.moved_to_output ? 'OK' : 'left in inbox');
-      // A document that only went in on the third try is worth knowing about,
-      // whether or not it eventually worked.
-      const note = el('td', null, inv.attempts > 1 ? `${outcome} · ${inv.attempts} attempts` : outcome);
-      const d = inv.error_detail;
-      if (d) {
-        if (d.hint) note.appendChild(el('div', 'failure-hint', d.hint));
-        if (d.screenshot) {
-          const b = el('button', 'btn btn-quiet', 'Screenshot');
-          b.addEventListener('click', () => window.rejsudai.shell.openPath(d.screenshot));
-          note.appendChild(b);
-        }
-      }
-      tr.appendChild(note);
-      table.appendChild(tr);
-    }
-    for (const doc of m.supporting_documents || []) {
-      const tr = el('tr');
-      tr.appendChild(el('td', null, doc.file));
-      tr.appendChild(el('td', null, 'supporting'));
-      tr.appendChild(el('td', null, doc.attached_to ? `attached to ${doc.attached_to}` : '—'));
-      tr.appendChild(el('td', null, doc.moved_to_output ? 'OK' : 'not attached'));
-      table.appendChild(tr);
-    }
-    body.appendChild(table);
+    const said = item.status === 'running'
+      ? 'This settlement is being filed. Its result appears here as it goes.'
+      : item.manifest && item.manifest.error
+        ? `Its record (manifest.json) cannot be read: ${item.manifest.error}`
+        : item.manifestLoading
+          ? 'Reading its record…'
+          : item.error
+            ? 'Nothing was filed — the run stopped before it had a draft to file into.'
+            : 'This settlement has not been filed yet.';
+    body.appendChild(el('p', 'subtle', said));
+    if (waiting.length) body.appendChild(documentTable([], [], waiting));
+    return;
   }
+
+  const s = m.settlement;
+  const tallies = el('div', 'tallies');
+  const tally = (n, label) => {
+    const wrap = el('div');
+    wrap.appendChild(el('span', 'tally-n', String(n)));
+    wrap.appendChild(el('span', 'tally-l', label));
+    return wrap;
+  };
+  tallies.appendChild(tally(s.expenses_card ?? 0, 'card lines'));
+  tallies.appendChild(tally(s.expenses_normal_cost ?? 0, 'normal cost'));
+  // Read off the folder, not the record: receipts added since the last run are
+  // waiting too.
+  tallies.appendChild(tally(waiting.length, 'waiting'));
+  body.appendChild(tallies);
+
+  const meta = el('p', 'subtle');
+  meta.textContent = `Draft "${s.draft_name}"${s.settlement_number ? ` · no. ${s.settlement_number}` : ''}`;
+  body.appendChild(meta);
+
+  // Where it stands, in the terms of what to do next.
+  const sub = s.submit || {};
+  const where = el('p', sub.submitted ? 'msg ok' : 'subtle');
+  where.textContent = sub.submitted
+    ? 'Sent for approval.'
+    : waiting.length
+      ? `${plural(waiting.length, 'receipt')} waiting in input/ — process the settlement to file ${waiting.length === 1 ? 'it' : 'them'} into this draft.`
+      : 'Every receipt is filed. The draft is ready for you to review and send in indfak2.';
+  body.appendChild(where);
+  // Worth a line of its own when sending was asked for and did not happen.
+  if (sub.requested && !sub.submitted) {
+    const line = el('p', 'msg err');
+    line.textContent = `Not submitted — ${sub.skipped_reason || (sub.errors || []).join(' | ') || 'reason unknown'}. It is still a draft in indfak2.`;
+    body.appendChild(line);
+  }
+
+  const runs = m.runs || [];
+  if (runs.length > 1) {
+    const day = at => new Date(at).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+    body.appendChild(el('p', 'subtle',
+      `Filed over ${runs.length} runs, from ${day(runs[0].run_at)} to ${day(runs[runs.length - 1].run_at)}.`));
+  }
+
+  // A settlement somebody steered by hand is not the same kind of result as
+  // one the automation reached on its own, so the questions it was asked —
+  // and what was answered — are part of what happened. 2FA is left out: it is
+  // asked of every run and says nothing about this one.
+  const asked = (s.questions || []).filter(q => q.kind !== 'totp');
+  if (asked.length) {
+    body.appendChild(el('p', 'subtle', asked.length === 1
+      ? 'One question was asked while filing this settlement:'
+      : `${asked.length} questions were asked while filing this settlement:`));
+    const list = el('ul', 'steps');
+    for (const q of asked) {
+      list.appendChild(el('li', null,
+        `${q.question} → ${q.label || q.answer}${q.answered ? '' : ' (nobody answered — the default was taken)'}`));
+    }
+    body.appendChild(list);
+  }
+
+  body.appendChild(documentTable(m.invoices || [], m.supporting_documents || [], waiting));
+
+  // What reading and planning this settlement cost, over all its runs. The
+  // prompts and replies behind it are in manifest.json and the log, too long
+  // to show here.
+  const claude = m.claude;
+  if (claude && claude.calls && claude.calls.length) {
+    const n = claude.calls.length;
+    const t = claude.tokens || {};
+    body.appendChild(el('p', 'subtle',
+      `Claude: ${n === 1 ? '1 call' : `${n} calls`} · ${(t.input || 0).toLocaleString('en-US')} tokens in, `
+      + `${(t.output || 0).toLocaleString('en-US')} out · est. $${Number(claude.estimated_cost_usd || 0).toFixed(4)}. `
+      + 'Every prompt and reply is in manifest.json.'));
+  }
+}
+
+// Every document in the settlement: the filed ones and the failures from the
+// record, then whatever is waiting in input/ that the record has not seen yet.
+function documentTable(invoices, supporting, waiting) {
+  const table = el('table');
+  const head = el('tr');
+  for (const h of ['Document', 'Role', 'Filed as', 'Notes']) head.appendChild(el('th', null, h));
+  table.appendChild(head);
+  const inInput = new Set(waiting);
+  for (const inv of invoices) {
+    const tr = el('tr');
+    if (inv.errors && inv.errors.length) tr.className = 'result-row-err';
+    tr.appendChild(el('td', null, inv.file));
+    tr.appendChild(el('td', null, inv.role || '—'));
+    tr.appendChild(el('td', null, inv.expense_type || '—'));
+    const outcome = (inv.errors && inv.errors.join('; '))
+      || (inv.moved_to_output ? 'OK' : inInput.has(inv.file) ? 'waiting in input/' : 'not filed');
+    // A document that only went in on the third try is worth knowing about,
+    // whether or not it eventually worked.
+    const note = el('td', null, inv.attempts > 1 ? `${outcome} · ${inv.attempts} attempts` : outcome);
+    const d = inv.error_detail;
+    if (d) {
+      if (d.hint) note.appendChild(el('div', 'failure-hint', d.hint));
+      if (d.screenshot) {
+        const b = el('button', 'btn btn-quiet', 'Screenshot');
+        b.addEventListener('click', () => window.rejsudai.shell.openPath(d.screenshot));
+        note.appendChild(b);
+      }
+    }
+    tr.appendChild(note);
+    table.appendChild(tr);
+  }
+  for (const doc of supporting) {
+    const tr = el('tr');
+    tr.appendChild(el('td', null, doc.file));
+    tr.appendChild(el('td', null, 'supporting'));
+    tr.appendChild(el('td', null, doc.attached_to ? `attached to ${doc.attached_to}` : '—'));
+    tr.appendChild(el('td', null, doc.moved_to_output ? 'OK' : 'not attached'));
+    table.appendChild(tr);
+  }
+  const recorded = new Set([...invoices, ...supporting].map(e => e.file));
+  for (const file of waiting) {
+    if (recorded.has(file)) continue;
+    const tr = el('tr', 'result-row-new');
+    tr.appendChild(el('td', null, file));
+    tr.appendChild(el('td', null, '—'));
+    tr.appendChild(el('td', null, '—'));
+    tr.appendChild(el('td', null, 'new — not filed yet'));
+    table.appendChild(tr);
+  }
+  return table;
 }
 $('#btn-totp-help').addEventListener('click', () => ($('#totp-help-modal').hidden = false));
 $('#totp-help-close').addEventListener('click', () => ($('#totp-help-modal').hidden = true));
@@ -1178,7 +1339,6 @@ function alertMsg(text) {
 
 /* -------------------------------------------------------------- settings -- */
 const SETTING_FIELDS = {
-  claimsOutput: 's-output',
   expenseAliasOption: 's-alias-option',
   expenseType: 's-type',
   expensePurpose: 's-purpose',
@@ -1188,6 +1348,8 @@ const SETTING_FIELDS = {
 async function loadSettings() {
   const s = await window.rejsudai.settings.get();
   for (const [key, id] of Object.entries(SETTING_FIELDS)) $(`#${id}`).value = s[key] ?? '';
+  // Shown, not edited: the app keeps its settlements there.
+  $('#s-settlements').value = s.receiptsInbox || '';
   $('#s-headless').checked = !!s.headless;
   $('#s-ask').checked = s.askOnFailure !== false;
   $('#s-ask-timeout').value = s.askTimeoutSeconds ?? 300;
@@ -1311,12 +1473,9 @@ $('#btn-save-settings').addEventListener('click', async () => {
   scanInbox();
 });
 
-document.querySelectorAll('[data-pick]').forEach(btn => {
-  btn.addEventListener('click', async () => {
-    const input = $(`#${btn.dataset.pick}`);
-    const dir = await window.rejsudai.dialog.pickDirectory({ title: btn.dataset.pickTitle, defaultPath: input.value });
-    if (dir) input.value = dir;
-  });
+$('#btn-open-settlements').addEventListener('click', () => {
+  const dir = $('#s-settlements').value;
+  if (dir) window.rejsudai.shell.openPath(dir);
 });
 
 function flash(sel, text, cls) {
@@ -1437,14 +1596,23 @@ async function probeBrowser() {
     node.textContent = 'Chromium is not installed yet. The automation needs it to drive indfak2 — download it once (about 150 MB).';
     $('#btn-install-browser').textContent = 'Download Chromium…';
     badge.hidden = false;
-    badge.textContent = 'Chromium not installed';
+    badge.textContent = 'Download Chromium';
+    badge.title = 'Download Chromium now';
+    badge.setAttribute('aria-label', 'Download Chromium now');
+    badge.disabled = browserInstalling;
   }
   return st;
 }
 
-$('#btn-install-browser').addEventListener('click', async () => {
+let browserInstalling = false;
+async function installChromium() {
+  if (browserInstalling) return;
+  browserInstalling = true;
   const btn = $('#btn-install-browser');
+  const badge = $('#browser-badge');
   btn.disabled = true;
+  badge.disabled = true;
+  if (!badge.hidden) badge.textContent = 'Downloading Chromium…';
   flash('#browser-msg', 'Downloading…', '');
   try {
     await window.rejsudai.browser.install();
@@ -1453,14 +1621,34 @@ $('#btn-install-browser').addEventListener('click', async () => {
   } catch (err) {
     flash('#browser-msg', clean(err), 'err');
   } finally {
+    browserInstalling = false;
     btn.disabled = false;
+    badge.disabled = false;
   }
-});
+}
+
+$('#btn-install-browser').addEventListener('click', installChromium);
+$('#browser-badge').addEventListener('click', installChromium);
 
 window.rejsudai.onBrowserProgress(({ line }) => {
   $('#browser-msg').textContent = line.slice(0, 90);
   appendLog(line + '\n', 'app');
 });
+
+/* --------------------------------------------------------------- updates -- */
+// The latest-release endpoint is checked once, after the app is usable. A
+// matching artifact is selected in the main process for this OS and CPU; the
+// tag opens that direct download in the normal browser.
+async function checkForUpdate() {
+  const update = await window.rejsudai.updates.check();
+  if (!update || !update.available) return;
+  const badge = $('#update-badge');
+  badge.hidden = false;
+  badge.textContent = `Update ${update.version} available`;
+  badge.title = `Download ${update.assetName}`;
+  badge.setAttribute('aria-label', `Download Rejsudai ${update.version}: ${update.assetName}`);
+  badge.addEventListener('click', () => window.rejsudai.updates.open(update.url).catch(() => {}), { once: true });
+}
 
 /* ------------------------------------------------------------------ init -- */
 (async function init() {
@@ -1477,5 +1665,8 @@ window.rejsudai.onBrowserProgress(({ line }) => {
   }
   const info = await window.rejsudai.appInfo();
   $('#app-info').textContent = `Rejsudai ${info.version} · data in ${info.userData}`;
+  // A failed update lookup is intentionally invisible: the app must remain
+  // entirely usable on a train, behind a firewall, or during a GitHub outage.
+  checkForUpdate().catch(() => {});
   setRunning(await window.rejsudai.run.state());
 })();

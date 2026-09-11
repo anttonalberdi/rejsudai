@@ -1,17 +1,27 @@
 'use strict';
-// Inbox scanning — a pending settlement is a directory directly inside
-// RECEIPTS_INBOX holding either receipts or the metadata file the app writes
-// with them. The folder is named after the settlement; its alias and the name
-// as it was typed live in that metadata file, which is also what bot.js reads.
+// Settlement folders. Each settlement is one directory directly inside
+// RECEIPTS_INBOX, kept for as long as the settlement exists:
+//
+//   .rejsudai.json   its name as typed and its alias (written here)
+//   input/           receipts waiting to be filed
+//   processed/       receipts already in the indfak2 draft (moved there by bot.js)
+//   manifest.json    bot.js's record of what is filed where
+//
+// Adding receipts to a settlement puts them in input/; running it again files
+// them into the same draft. A folder made by hand, with its receipts loose
+// inside, is read the same way bot.js reads it: loose documents are input.
 
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
 const DOC_RE = /\.(pdf|png|jpe?g|heic)$/i;
 
-// Mirrors SETTLEMENT_META / readSettlementMeta() in bot.js, so the list shows
-// the name and alias the draft will actually get.
+// Mirror SETTLEMENT_META / INPUT_DIR / PROCESSED_DIR / RECORD_FILE in bot.js.
 const META_FILE = '.rejsudai.json';
+const INPUT_DIR = 'input';
+const PROCESSED_DIR = 'processed';
+const RECORD_FILE = 'manifest.json';
 
 function nameFromFolder(folderName) {
   return folderName
@@ -43,13 +53,52 @@ function writeMeta(folderPath, { alias, name }) {
   );
 }
 
+// Document names directly inside `dir`, the way bot.js lists them: dot-files
+// are skipped, since macOS leaves "._x.pdf" shadow files on network volumes.
+function listDocs(dir) {
+  try {
+    return fs.readdirSync(dir, { withFileTypes: true })
+      .filter(e => e.isFile() && !e.name.startsWith('.') && DOC_RE.test(e.name))
+      .map(e => e.name)
+      .sort();
+  } catch {
+    return [];
+  }
+}
+
+// What the list needs from bot.js's record — enough to show where the
+// settlement stands. The full record is read only when its Details are opened.
+function readRecord(folderPath) {
+  const file = path.join(folderPath, RECORD_FILE);
+  let record;
+  try {
+    record = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch (err) {
+    if (err.code === 'ENOENT') return null;
+    return { path: file, unreadable: true, error: err.message };
+  }
+  const s = (record && record.settlement) || {};
+  const filed = [...(record.invoices || []), ...(record.supporting_documents || [])]
+    .filter(e => e && e.moved_to_output)
+    .map(e => e.file);
+  return {
+    path: file,
+    draftName: s.draft_name || null,
+    settlementNumber: s.settlement_number || null,
+    submitted: !!(s.submit && s.submit.submitted),
+    status: s.status || null,
+    filed,
+    updatedAt: record.updated_at || record.run_at || null,
+  };
+}
+
 function describeFolder(folderPath) {
   const folder = path.basename(folderPath);
   const { alias, settlementName } = readMeta(folderPath);
-  let files = [];
-  try {
-    files = fs.readdirSync(folderPath).filter(f => DOC_RE.test(f));
-  } catch {}
+  // Waiting to be filed: input/, plus anything loose in a hand-made folder.
+  const files = [...listDocs(path.join(folderPath, INPUT_DIR)), ...listDocs(folderPath)];
+  const processed = listDocs(path.join(folderPath, PROCESSED_DIR));
+  const record = readRecord(folderPath);
   return {
     id: folderPath,
     folder,
@@ -57,13 +106,17 @@ function describeFolder(folderPath) {
     alias,
     settlementName,
     fileCount: files.length,
-    files: files.sort(),
+    files,
+    processedCount: processed.length,
+    processed,
+    record,
+    manifestPath: record ? record.path : null,
   };
 }
 
 // A directory only counts as a settlement if the app filed it (it has the
-// metadata file) or it holds documents — an unrelated folder someone left in
-// the inbox is not listed as something to process.
+// metadata file), bot.js has worked on it, or it holds documents — an
+// unrelated folder someone left in the inbox is not listed.
 function isSettlementFolder(folderPath) {
   let entries;
   try {
@@ -71,7 +124,11 @@ function isSettlementFolder(folderPath) {
   } catch {
     return false;
   }
-  return entries.includes(META_FILE) || entries.some(f => DOC_RE.test(f));
+  return entries.includes(META_FILE)
+    || entries.includes(RECORD_FILE)
+    || entries.includes(INPUT_DIR)
+    || entries.includes(PROCESSED_DIR)
+    || entries.some(f => DOC_RE.test(f) && !f.startsWith('.'));
 }
 
 // The inbox is the app's own working folder, not a path the user points at —
@@ -106,9 +163,9 @@ function scan(inboxPath) {
 // --- composing a new settlement ---------------------------------------------
 // The app's "New settlement" page collects a name, an alias and a set of
 // receipts; filing them means creating the folder bot.js expects, copying the
-// documents in and writing the metadata beside them. slugify() only has to
-// produce a usable directory name — the settlement name and the alias are
-// carried by the metadata, not by the name of the folder.
+// documents into its input/ and writing the metadata beside them. slugify()
+// only has to produce a usable directory name — the settlement name and the
+// alias are carried by the metadata, not by the name of the folder.
 
 // Only a guard against nonsense in an alias code — settings.js validates the
 // alias library against the same rule.
@@ -175,7 +232,7 @@ function expand(paths) {
     for (const file of candidates) {
       if (seen.has(file)) continue;
       seen.add(file);
-      if (!DOC_RE.test(file)) {
+      if (!DOC_RE.test(file) || path.basename(file).startsWith('.')) {
         // A folder full of other things shouldn't produce a wall of complaints.
         if (!stat.isDirectory()) skipped.push({ name: path.basename(file), reason: 'not a PDF, PNG, JPEG or HEIC' });
         continue;
@@ -189,26 +246,41 @@ function expand(paths) {
   return { files, skipped };
 }
 
+// Every name a new document must not take in this settlement: whatever is in
+// input/, processed/ or loose in the folder, and everything the record says is
+// filed. A document's name is its identity in the record, so two receipts with
+// one name would share an entry.
+function takenNames(folderPath, record) {
+  return new Set([
+    ...listDocs(path.join(folderPath, INPUT_DIR)),
+    ...listDocs(path.join(folderPath, PROCESSED_DIR)),
+    ...listDocs(folderPath),
+    ...((record && record.filed) || []),
+  ]);
+}
+
 // fs.copyFileSync fails with ENOTSUP on SMB/virtiofs mounts — same reason
 // bot.js copies by hand.
-function copyInto(dir, src) {
+function copyInto(dir, src, taken) {
   const base = path.basename(src);
   const ext = path.extname(base);
   const stem = base.slice(0, base.length - ext.length);
-  let dest = path.join(dir, base);
-  for (let n = 2; fs.existsSync(dest); n++) dest = path.join(dir, `${stem}-${n}${ext}`);
+  let name = base;
+  for (let n = 2; taken.has(name); n++) name = `${stem}-${n}${ext}`;
+  taken.add(name);
+  const dest = path.join(dir, name);
   fs.writeFileSync(dest, fs.readFileSync(src));
   return dest;
 }
 
-// Creates the settlement folder and copies the documents in. Originals are left
-// where they are: bot.js moves processed files to CLAIMS_OUTPUT and deletes the
-// inbox folder, which should never consume the user's own copy.
+// Creates the settlement folder and copies the documents into its input/.
+// Originals are left where they are: bot.js moves what it files from input/ to
+// processed/, and that must never consume the user's own copy.
 function create(inboxPath, { alias, name, files } = {}) {
   const plan = propose(inboxPath, { alias, name });
   if (!plan.ok) throw new Error(plan.error);
   if (plan.exists) {
-    throw new Error(`A settlement folder named "${plan.folder}" already exists in the inbox. Use a different name, or process the pending one.`);
+    throw new Error(`A settlement folder named "${plan.folder}" already exists. Use a different name, or add the receipts to that settlement from the list.`);
   }
 
   // Never trust the renderer's list: re-resolve it against the disk.
@@ -220,7 +292,10 @@ function create(inboxPath, { alias, name, files } = {}) {
     // The metadata goes in first: a folder that exists without it would be read
     // back as a hand-made one, on the default alias.
     writeMeta(plan.path, { alias: plan.alias, name: plan.settlementName });
-    for (const file of resolved) copyInto(plan.path, file.path);
+    const input = path.join(plan.path, INPUT_DIR);
+    fs.mkdirSync(input);
+    const taken = new Set();
+    for (const file of resolved) copyInto(input, file.path, taken);
   } catch (err) {
     // A half-copied folder would file as a partial settlement — undo it.
     fs.rmSync(plan.path, { recursive: true, force: true });
@@ -229,15 +304,12 @@ function create(inboxPath, { alias, name, files } = {}) {
   return describeFolder(plan.path);
 }
 
-// --- removing a saved settlement --------------------------------------------
-// A settlement that was saved but not filed (or one left behind by a run) is
-// just its inbox folder, so removing it means deleting that folder and the
-// receipts copied into it. The renderer names the target, so the path is
-// re-checked here rather than trusted: only a directory sitting *directly*
-// inside the inbox qualifies. Symlinks are resolved first, so a link inside the
-// inbox pointing elsewhere fails the check instead of taking the real folder
-// with it.
-function remove(inboxPath, folderPath) {
+// The renderer names the settlement, so its path is re-checked rather than
+// trusted: only a directory sitting *directly* inside the inbox qualifies.
+// Symlinks are resolved first, so a link inside the inbox pointing elsewhere
+// fails the check instead of reaching through it. Returns the real path, or
+// null when the folder is already gone.
+function settlementDir(inboxPath, folderPath) {
   if (!folderPath) throw new Error('No settlement folder given.');
   // realpath, so a "/var/..." path and its "/private/var/..." twin compare
   // equal — and on the *parent*, which still exists when the folder itself is
@@ -252,7 +324,7 @@ function remove(inboxPath, folderPath) {
   const target = path.resolve(folderPath);
   const parent = real(path.dirname(target));
   if (parent !== real(inboxPath) || path.dirname(target) === target) {
-    throw new Error('Only a settlement folder inside the receipts inbox can be removed.');
+    throw new Error('Only a settlement folder inside the receipts inbox can be changed from here.');
   }
   const full = path.join(parent, path.basename(target));
 
@@ -260,17 +332,84 @@ function remove(inboxPath, folderPath) {
   try {
     stat = fs.lstatSync(full);
   } catch {
-    // Already gone — the caller wanted it gone, so that is a success.
-    return { removed: false, missing: true, path: folderPath };
+    return null;
   }
-  // A symlink is not a settlement folder, and deleting through one would reach
+  // A symlink is not a settlement folder, and following one would reach
   // outside the inbox.
   if (stat.isSymbolicLink()) throw new Error('That is a link, not a settlement folder.');
   if (!stat.isDirectory()) throw new Error('That is a file, not a settlement folder.');
+  return full;
+}
 
+const fileHash = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+
+// --- adding receipts to a settlement ----------------------------------------
+// The way a settlement is continued: new receipts go into its input/, and the
+// next run files them into the same draft. A receipt identical to one already
+// in the settlement — filed or waiting — is turned away here, where saying so
+// is easy, rather than left for the run to recognise as a duplicate.
+function addFiles(inboxPath, folderPath, files) {
+  const dir = settlementDir(inboxPath, folderPath);
+  if (!dir) throw new Error('That settlement folder is gone.');
+  const record = readRecord(dir);
+  if (record && record.unreadable) {
+    throw new Error(`This settlement's record (${RECORD_FILE}) cannot be read, so nothing can be added to it: ${record.error}`);
+  }
+  if (record && record.submitted) {
+    throw new Error('This settlement has already been sent for approval. File the new receipts as a settlement of their own.');
+  }
+
+  const { files: found, skipped } = expand(files || []);
+  const input = path.join(dir, INPUT_DIR);
+  const known = new Map();
+  for (const [sub, names] of [
+    [INPUT_DIR, listDocs(input)],
+    [PROCESSED_DIR, listDocs(path.join(dir, PROCESSED_DIR))],
+    ['', listDocs(dir)],
+  ]) {
+    for (const name of names) {
+      try {
+        known.set(fileHash(path.join(dir, sub, name)), name);
+      } catch {}
+    }
+  }
+
+  const taken = takenNames(dir, record);
+  const added = [];
+  fs.mkdirSync(input, { recursive: true });
+  for (const file of found) {
+    let hash;
+    try {
+      hash = fileHash(file.path);
+    } catch {
+      skipped.push({ name: file.name, reason: 'not readable' });
+      continue;
+    }
+    if (known.has(hash)) {
+      skipped.push({ name: file.name, reason: `already in this settlement as ${known.get(hash)}` });
+      continue;
+    }
+    const dest = copyInto(input, file.path, taken);
+    known.set(hash, path.basename(dest));
+    added.push(path.basename(dest));
+  }
+  return { settlement: describeFolder(dir), added, skipped };
+}
+
+// --- removing a settlement ---------------------------------------------------
+// A settlement is its folder, so removing it means deleting that folder: the
+// receipts copied into it, filed or not, and the record of what was filed.
+// Nothing in indfak2 is touched.
+function remove(inboxPath, folderPath) {
+  const full = settlementDir(inboxPath, folderPath);
+  // Already gone — the caller wanted it gone, so that is a success.
+  if (!full) return { removed: false, missing: true, path: folderPath };
   const described = describeFolder(full);
   fs.rmSync(full, { recursive: true, force: true });
   return { removed: true, missing: false, ...described };
 }
 
-module.exports = { scan, describeFolder, readMeta, propose, expand, create, remove, slugify, META_FILE };
+module.exports = {
+  scan, describeFolder, readMeta, propose, expand, create, addFiles, remove, slugify,
+  META_FILE, INPUT_DIR, PROCESSED_DIR, RECORD_FILE,
+};

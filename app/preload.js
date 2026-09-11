@@ -28,6 +28,7 @@ contextBridge.exposeInMainWorld('rejsudai', {
     propose: payload => ipcRenderer.invoke('inbox:propose', payload),
     expand: paths => ipcRenderer.invoke('inbox:expand', paths),
     create: payload => ipcRenderer.invoke('inbox:create', payload),
+    addFiles: (folderPath, files) => ipcRenderer.invoke('inbox:addFiles', { folderPath, files }),
     remove: folderPath => ipcRenderer.invoke('inbox:remove', folderPath),
   },
   dialog: {
@@ -47,6 +48,10 @@ contextBridge.exposeInMainWorld('rejsudai', {
   browser: {
     status: () => ipcRenderer.invoke('browser:status'),
     install: () => ipcRenderer.invoke('browser:install'),
+  },
+  updates: {
+    check: () => ipcRenderer.invoke('updates:check'),
+    open: url => ipcRenderer.invoke('updates:open', url),
   },
   manifest: {
     read: manifestPath => ipcRenderer.invoke('manifest:read', manifestPath),

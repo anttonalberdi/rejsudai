@@ -20,7 +20,79 @@ file.
 
 ## [Unreleased]
 
-_Nothing yet._
+---
+
+## [1.0.3] — 2026-09-11
+
+_A filed settlement can take more receipts, the app says when a newer version
+is out, and every Claude call is on the record with what it cost._
+
+### Added
+
+- **Update notices.** On launch Rejsudai checks its GitHub releases. When a
+  newer version has a download for this Mac's processor, a top-right tag opens
+  that exact `.dmg` in the normal browser.
+- **One-click Chromium setup.** The top-right Chromium tag is now a button:
+  click it to start the same first-run download available in Settings.
+- **A filed settlement can take more receipts.** Settlements now stay in the
+  list after they are filed. **Add receipts…** on one (or dropping files onto
+  it) and processing it again files them into the same indfak2 draft. The run
+  reconnects to that draft by its exact name and settlement number. It stops
+  rather than starting a second draft when the first has gone. It also plans
+  the new receipts with the filed ones in view, so a document covering a cost
+  that is already in the draft is attached as evidence, not claimed twice. A
+  receipt identical to one already in the settlement is turned away when you
+  add it. A settlement already sent for approval takes nothing more. A new
+  **Partly filed** status marks a settlement with a draft and receipts waiting
+  for it.
+- **Every Claude call is on the record, with what it cost.** The log now shows
+  each prompt sent to Claude, the reply that came back, the tokens used and an
+  estimated cost. The parsing instruction is printed once and referred back to
+  after that. A run ends with the settlement's total, even when it failed.
+  `manifest.json` gains a `claude` section with the total, the prices it was
+  worked out with, and every call in full, and the *Details* tab shows the
+  total. Attached receipts are named in the prompt, never copied into it. The
+  figure is an estimate from Anthropic's list prices; the Anthropic invoice is
+  what counts.
+
+### Changed
+
+- **One folder per settlement, kept for as long as the settlement.** Receipts
+  wait in the settlement's `input/` folder and move to `processed/` as soon as
+  their line is saved in indfak2. Its `manifest.json` sits beside them and
+  covers the whole settlement across every run. Nothing is written to
+  claims-output any more, and a settlement's folder is no longer deleted once
+  everything is filed. The claims-output setting is gone from Settings;
+  *Folders* now shows where the settlements are kept. Settlements filed
+  before this change live on in claims-output and cannot be continued.
+- The record is saved after every document rather than once at the end, so a
+  run that crashes part-way leaves the settlement knowing exactly what is in
+  its draft, and the next run carries on from there.
+- A folder made by hand, with its receipts loose inside, still works: they are
+  read as input and move to `processed/` once filed. `run-pending.sh` skips
+  settlements whose receipts are all filed.
+
+### Fixed
+
+- **A draft is found by its whole name.** Re-entering a draft matched any draft
+  whose name *contained* the settlement's, so `* Oslo` could have filed into
+  `* Oslo Workshop`.
+- **Supporting documents on a failed out-of-pocket line are no longer lost.**
+  When a Normal cost line would not save, the documents uploaded with it were
+  still recorded as attached, although the form they were on had been
+  cancelled. They now wait for the next line, like after any other failure.
+- **A ticket bought directly is filed as a cost, not stapled to another
+  line.** Every ticket and booking confirmation used to be read as evidence
+  with no price. A DSB train ticket, the only record of the journey's cost, was
+  attached to a café receipt, and the fare never became a line. Tickets now
+  keep their price and become an expense of their own. The exception is a
+  ticket covered by a travel-agency invoice in the same settlement: that one is
+  still attached to the invoice, and a check after the plan makes sure the same
+  booking is never filed twice.
+- **A cost paid before the trip no longer fails on its date.** indfak2 only
+  accepts line dates between Departure and Arrival. An out-of-pocket line paid
+  outside that window is now dated at the nearer end of the trip. Its
+  description keeps the real payment date, and the manifest notes the change.
 
 ---
 
@@ -289,6 +361,7 @@ history is in the git log, from the initial commit through
 That CLI still works — see [`DEVELOPING.md`](DEVELOPING.md).
 
 <!-- Add one link per release as it is tagged. -->
+[1.0.3]: https://github.com/anttonalberdi/rejsudai/releases/tag/v1.0.3
 [1.0.2]: https://github.com/anttonalberdi/rejsudai/releases/tag/v1.0.2
 [1.0.1]: https://github.com/anttonalberdi/rejsudai/releases/tag/v1.0.1
 [1.0.0]: https://github.com/anttonalberdi/rejsudai/releases/tag/v1.0.0

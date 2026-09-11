@@ -15,12 +15,14 @@ fi
 
 echo "Scanning inbox: $RECEIPTS_INBOX"
 
-# Every settlement folder directly inside the inbox that holds something to file
+# Every settlement folder directly inside the inbox that holds something to
+# file: documents in its input/, or loose in a folder made by hand. A settlement
+# whose receipts are all in processed/ has nothing to do.
 pending=()
 while IFS= read -r -d '' dir; do
   basename=$(basename "$dir")
   case "$basename" in .*) continue ;; esac
-  if find "$dir" -maxdepth 1 -type f \
+  if find "$dir" "$dir/input" -maxdepth 1 -type f ! -name '.*' \
        \( -iname '*.pdf' -o -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.heic' \) \
        -print -quit 2>/dev/null | grep -q .; then
     pending+=("$basename")

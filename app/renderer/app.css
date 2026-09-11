@@ -62,7 +62,7 @@ h3 { font-size: 15px; margin: 0 0 6px; }
   border-bottom: 1px solid var(--line);
   background: var(--panel);
 }
-.titlebar-right { margin-left: auto; -webkit-app-region: no-drag; }
+.titlebar-right { margin-left: auto; display: flex; align-items: center; gap: 7px; -webkit-app-region: no-drag; }
 /* Brand sits between the traffic lights (cleared by the 84px padding) and the tabs. */
 .brand { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; margin-right: 6px; user-select: none; }
 .brand-mark { display: block; width: 24px; height: 24px; border-radius: 6px; box-shadow: 0 1px 2px rgba(0, 0, 0, .18); }
@@ -206,6 +206,11 @@ td .btn { margin-top: 5px; padding: 2px 8px; font-size: 11px; }
 .status[data-status="submitted"] { color: var(--ok); border-color: var(--ok); background: color-mix(in srgb, var(--ok) 12%, transparent); }
 .status[data-status="error"] { color: var(--err); border-color: var(--err); }
 .status[data-status="cancelled"] { color: var(--warn); border-color: var(--warn); }
+/* It has a draft, and receipts waiting for it: work in progress, not a problem. */
+.status[data-status="partial"] { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); }
+.status[data-status="empty"] { border-style: dashed; }
+/* Receipts dragged over a settlement are added to it. */
+.settlement.is-drop { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, var(--panel)); opacity: 1; }
 .empty { text-align: center; color: var(--ink-soft); padding: 26px 20px; margin: 0; }
 
 /* ---------- log ---------- */
@@ -303,8 +308,13 @@ input.alias-code { flex: 0 0 132px; }
 .notice-warn { background: color-mix(in srgb, var(--warn) 12%, transparent); border-color: color-mix(in srgb, var(--warn) 35%, transparent); margin: 0 14px 10px; }
 /* the inbox warning sits in a panel and needs the inset; one inside a card does not */
 .card > .notice-warn { margin: 0 0 12px; }
-.badge { font-size: 11px; padding: 3px 9px; border-radius: 20px; border: 1px solid var(--warn); color: var(--warn); }
+.badge { font: inherit; font-size: 11px; line-height: 1.35; padding: 3px 9px; border-radius: 20px; border: 1px solid var(--warn); color: var(--warn); background: transparent; }
 .badge-live { border-color: var(--ok); color: var(--ok); }
+.badge-update { border-color: var(--accent); color: var(--accent); }
+.badge-action { cursor: pointer; }
+.badge-action:hover { background: color-mix(in srgb, currentColor 10%, transparent); }
+.badge-action:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.badge-action:disabled { cursor: wait; opacity: .72; }
 
 /* ---------- modals ---------- */
 /* Above the splitters (z-index 2), which would otherwise draw a strip across
@@ -351,6 +361,7 @@ input.alias-code { flex: 0 0 132px; }
 .details-body th, .details-body td { text-align: left; padding: 5px 7px; border-bottom: 1px solid var(--line); vertical-align: top; }
 .details-body th { color: var(--ink-soft); font-weight: 500; white-space: nowrap; }
 .result-row-err td { color: var(--err); }
+.result-row-new td { color: var(--ink-soft); font-style: italic; }
 .tallies { display: flex; gap: 16px; margin: 6px 0 2px; }
 .tally-n { font-size: 19px; font-weight: 600; display: block; }
 .tally-l { font-size: 11px; color: var(--ink-soft); }

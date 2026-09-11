@@ -77,6 +77,8 @@ class Runner extends EventEmitter {
       ...creds,
       // The config knobs bot.js already reads.
       RECEIPTS_INBOX: settings.receiptsInbox,
+      // Only single-file runs write here; a settlement keeps its record in its
+      // own folder. The app runs folders, so this is passed for completeness.
       CLAIMS_OUTPUT: settings.claimsOutput,
       EXPENSE_ALIAS: settings.expenseAlias,
       EXPENSE_ALIAS_OPTION: settings.expenseAliasOption,

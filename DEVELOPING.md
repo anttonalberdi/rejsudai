@@ -139,7 +139,9 @@ Those read credentials and paths from `.env` as they always did. `CLAUDE.md`
 documents the automation's behaviour, settlement logic, and edge cases in full.
 
 `run-pending.sh` is the original Linux-era batch script; it runs relative to
-the checkout, while the app's Process button replaces it for normal use.
+the checkout, while the app's Process button replaces it for normal use. It
+runs every settlement with something in `input/` (or loose inside), and skips
+the ones whose receipts are all in `processed/`.
 
 ## How the app wraps the automation
 
@@ -151,8 +153,8 @@ hard-won, and treated as a black box.
   bundled Node via `ELECTRON_RUN_AS_NODE=1`, so no system Node is required.
 - All configuration and credentials go in through the child's **environment
   variables** — the same names `bot.js` already reads. No `.env` is written.
-- `stdout`/`stderr` are streamed to the log pane; `manifest.json` is read back
-  for the structured per-settlement result.
+- `stdout`/`stderr` are streamed to the log pane; the settlement's own
+  `manifest.json` is read back for the structured result.
 - The child also gets Node's **IPC channel** as a fourth stdio slot, which
   carries only the live browser frames — base64 JPEGs would otherwise swamp the
   log and be pointlessly scanned by the credential redaction pass.
@@ -176,8 +178,42 @@ CLI behaviour is unchanged. They are marked with comments in the source:
 | `rejsudaiStowWindow()` after `browser.newPage()` | Moves the Chromium window off the bottom of the desktop as soon as it exists — the app mirrors the page in the Browser pane, so the window is a fallback for working the page by hand, not the view. `--no-startup-window` means no window exists until `newPage()`, so it is on screen for about 35 ms. **Not minimised:** a minimised window on macOS stops compositing, and measured against a normal window it kills the screencast outright (0 frames vs 41 over 4 s, and it does not recover when the window is restored), makes `page.screenshot()` block until it times out, and slows actionability waits (2.0 s vs 0.6 s for a click on an animating element). Parked off screen everything measures the same as on screen. macOS clamps how far a window may travel, so the landing position is checked against the display's height and put back if it would leave a strip visible. `askAboutFailure()` restores it — position and focus — before any question, since half those answers want hands on the page. Returns `null` on a CLI run (no mirror to fall back on) and when headless (no window). |
 | `rejsudaiStartScreencast()` after `browser.newPage()` | Feeds the Browser pane. Requires `app/lib/screencast.js` lazily and only when the app spawned the process (`process.send` exists), so a CLI run neither loads it nor pays for it. Failures are logged and ignored — a dead preview must not fail a settlement. |
 
-Beyond the optional submit step at the very end of a run, no control flow in the
-indfak2 or Playwright logic was changed.
+Beyond the optional submit step at the very end of a run, and the choice of
+which draft to file into (below), no control flow in the indfak2 or Playwright
+logic was changed.
+
+### Settlement folders
+
+Unlike the table above, this changes the CLI too, because it is how a
+settlement is kept rather than how the app watches one. A settlement is one
+folder in `RECEIPTS_INBOX` for as long as it exists: `.rejsudai.json` (written
+by `inbox.js`), `input/` (waiting), `processed/` (in the draft) and
+`manifest.json` (bot.js's cumulative record). `bot.js` moves each document to
+`processed/` as its line saves and rewrites the record after every document.
+A later run reconnects to the draft the record names instead of making one.
+`CLAUDE.md` → *Continuing a settlement* has the rules that keep that from
+filing anything twice.
+
+On the app side:
+
+- `inbox.describeFolder()` reports `files` (input/ plus anything loose),
+  `processed`, and a summary of the record. The full record is only read when
+  the Details tab asks for it (`loadManifest`), since it carries every Claude
+  prompt.
+- The renderer's `diskStatus()` turns that into the chip: `queued` (never
+  filed), `partial` (a draft, and receipts waiting), `done` (*Ready*),
+  `submitted`, `empty`. `error` and `cancelled` are this session's and survive
+  a rescan, because the folder cannot say what went wrong.
+- Only a settlement with something in `input/` can be selected for **Process**.
+  **Add receipts…** (button or a drop onto the card) goes through
+  `inbox:addFiles`. That handler refuses a submitted settlement and one that is
+  in the current run, drops files identical (sha-256) to any already in the
+  settlement, and never reuses a name that is in `input/`, in `processed/`, or
+  filed in the record.
+- Removing a settlement deletes its folder: receipts, filed ones included, and
+  the record. The confirmation says so.
+- `CLAIMS_OUTPUT` only matters to single-file runs, which the app does not make,
+  so Settings no longer has a field for it.
 
 ### How a failure is reported
 
@@ -212,7 +248,7 @@ app/main.js                                 app lifecycle, IPC, child processes
 app/preload.js                              the entire renderer API surface
 app/lib/settings.js                         non-secret settings (userData JSON)
 app/lib/credentials.js                      safeStorage/Keychain + .env fallback
-app/lib/inbox.js                            inbox scan, new-settlement folders, removal
+app/lib/inbox.js                            settlement folders: scan, create, add receipts, removal
 app/lib/runner.js                           spawns bot.js, streams output, queue
 app/lib/browsers.js                         Playwright Chromium resolve/install
 app/lib/screencast.js                       live browser frames (runs inside bot.js)

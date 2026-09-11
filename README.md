@@ -39,6 +39,10 @@ No terminal. No setup beyond filling in your credentials once.
    That is a one-off. Rejsudai opens normally from then on, and updates you install
    later need the same line again.
 
+Rejsudai checks GitHub when it opens. If a newer build is available for your
+Mac's processor, the **Update … available** tag in the top-right opens the
+matching `.dmg` download in your normal browser.
+
 ## Before you start
 
 You need three things:
@@ -88,8 +92,11 @@ in a dialog.
 
 ### 2. Folders
 
-Where processed receipts and manifests are written. Defaults to your home
-folder.
+Nothing to set. **Settings → Folders** shows where your settlements are kept
+(`~/Rejsudai/receipts-inbox`), with a button to open it. Each settlement is a
+folder in there: `input/` holds the receipts waiting to be filed,
+`processed/` the ones already in the indfak2 draft, and `manifest.json` the
+record of what went where.
 
 ### 3. Expense defaults
 
@@ -132,34 +139,76 @@ the list then shows it as **Running**.
 
 - Receipts can be **PDFs, PNGs, JPEGs or HEIC photos** of paper receipts.
   Anything else is listed as skipped rather than silently dropped.
+- A **ticket bought directly** (a DSB ticket, say) is filed as a cost of its
+  own. If you bought it before the trip, the line is dated on the day you
+  left, because indfak2 won't accept a date outside the trip. The day you paid
+  stays in the description. A ticket that duplicates a travel-agency invoice
+  in the same settlement is attached to that invoice instead.
 - Receipts are **copied** in. Your originals stay where they are.
 - Dropping files and declaring a folder are alternatives — doing one clears the
   other.
-- A name whose folder already exists is refused while you type, so a new
-  settlement can never merge into a pending one.
+- A name that another settlement already has is refused while you type, so a
+  new settlement can never merge into an existing one. To add to that one, use
+  its **Add receipts…** instead (below).
 - Picking **New alias…** reveals a short-name and code pair. **Add to library**
   saves it without filing anything, and running the settlement saves it anyway,
   so an alias typed once is in the dropdown from then on. Only the code reaches
   indfak2 — the short name is there so the list reads as project names rather
   than digits.
 
-Rejsudai also lists any folder of receipts it finds sitting in your inbox as a
-pending settlement. Select some and press **Process** to file them in one batch.
+**A settlement stays in the list after it is filed**, with its receipts and
+its record, for as long as you keep it. Rejsudai also lists any folder of
+receipts it finds in the settlements folder, including ones made by hand.
+Select the ones with something to file and press **Process** to file them in
+one batch.
+
+### Adding receipts to a settlement later
+
+The hotel invoice arrives a week after the trip, or a receipt turns up in a
+coat pocket. Press **Add receipts…** on the settlement (or drop the files onto
+it) and process it again. The receipts go into the settlement's `input/`
+folder, and the run files them into **the same draft** in indfak2. It never
+starts a second one.
+
+- The run **reconnects** to the draft by its exact name and checks the
+  settlement number against the one it recorded. If the draft has gone from
+  your drafts (sent, deleted or renamed in indfak2 since), the run stops and
+  says so. It does not start a fresh draft that would split the settlement in
+  two.
+- It **knows what is already filed**. Reading the new receipts, it sees the
+  ones already in the draft, so an e-ticket for a flight whose invoice went in
+  last week is attached as evidence, not claimed a second time.
+- A receipt **identical** to one already in the settlement is turned away when
+  you add it, with a note saying which one it matches. One that only shares a
+  name is kept under a new name (`hotel-2.pdf`).
+- The draft keeps its header: the trip dates, type and purpose it was created
+  with. A new out-of-pocket cost paid before the trip is dated on the day you
+  left, like any other.
+- **Evidence alone cannot be added.** An itinerary or a booking confirmation
+  is attached to a cost line filed in the same run, and Rejsudai cannot open a
+  line already in the draft to add one. Add it together with a cost, or attach
+  it in indfak2 by hand.
+- A settlement that has been **sent for approval** takes nothing more. Put the
+  new receipts in a settlement of their own.
 
 ### What the status on a settlement means
 
 | | |
 |---|---|
-| **Queued** | Waiting to be filed. |
+| **Queued** | Waiting to be filed for the first time. |
 | **Running** | Being filed into indfak2 now. |
-| **Ready** | Filed. The draft is complete in indfak2 and the approval is yours to press. |
+| **Partly filed** | It has a draft in indfak2, and receipts waiting to go into it — ones you added since, or ones that did not make it last time. Process it to file them. |
+| **Ready** | Every receipt is filed. The draft is complete in indfak2 and the approval is yours to press. |
 | **Submitted** | Sent for approval — the run pressed it for you, because *Submit for approval* was on. |
 | **Failed** | Something stopped it. The reason is on the **Details** tab. |
 | **Cancelled** | The run was stopped before this settlement finished. |
+| **Empty** | The folder has no receipts in it yet. |
 
 The distinction worth knowing is **Ready** against **Submitted**: both mean the
 run did its job, but only one of them means indfak2 has been asked to approve
-anything. A *Ready* settlement is still sitting there waiting for you.
+anything. A *Ready* settlement is still sitting there waiting for you. If you
+send it yourself in indfak2, the app cannot tell and it goes on saying *Ready*.
+Delete it from the list once you no longer need its record.
 
 ### Watching a run
 
@@ -184,9 +233,24 @@ visible while it is happening. *Waiting for your answer* means the run has
 stopped and put a question on screen; see [It asks before it gives
 up](#it-asks-before-it-gives-up).
 
-Each settlement ends with a status (queued / running / done / submitted /
-failed), the error if it failed, and buttons to open its output folder and its
-`manifest.json` — the record of exactly what was filed where.
+Each settlement shows a status (see above), the error if it failed, and buttons
+to add receipts, open its folder, and open its `manifest.json`, the record of
+exactly what was filed where. Its **Details** cover the whole settlement across
+every run: each document filed, each one still waiting, every question asked,
+and what Claude cost in total.
+
+### What Claude was asked, and what it cost
+
+Every time a run asks Claude something (reading a receipt, planning the
+settlement, choosing a cost type), the log shows the prompt that was sent, the
+reply that came back, the tokens used and the estimated cost. A run ends with
+the total for the run, even if it failed. The **Details** tab shows the total
+for the whole settlement below the table, every run included, and
+`manifest.json` keeps every call in full under `claude`. Attached receipts are
+named in the prompt, not copied into it.
+
+The estimate is worked out from the token counts Claude reports and Anthropic's
+list prices. Your Anthropic bill is the final word.
 
 ## Draft, or submitted
 
@@ -200,10 +264,10 @@ duration of a run, and asks for confirmation before the run starts. Tick *Don't
 ask again* in that dialog, or turn the question back on under **Settings →
 Submitting**.
 
-A settlement is only sent when the whole folder made it in: every document filed,
-every supporting document attached, no line-save errors. Anything left over and
-it stays a draft, says why, and leaves the unprocessed receipts in the inbox
-folder for another go. Sending is verified rather than assumed — a settlement
+A settlement is only sent when all of it made it in: every document filed,
+across every run, every supporting document attached, no line-save errors.
+Anything left over and it stays a draft, says why, and leaves the unprocessed
+receipts in its `input/` folder for another go. Sending is verified rather than assumed — a settlement
 counts as submitted only once it has actually left the drafts list in indfak2.
 
 ## When a run fails
@@ -242,8 +306,8 @@ the page that went wrong, showing what it says went wrong.
   page that went wrong: put it right by hand — dismiss whatever indfak2 is complaining about, close a dialog that
   should not be there — and then retry. This is the one that saves a whole
   re-run.
-- **Skip it and carry on.** The document stays in the inbox for another day and
-  the rest of the folder is filed.
+- **Skip it and carry on.** The document stays in the settlement's `input/`
+  for another day and the rest of the folder is filed.
 - **Stop the run here.** Lines already filed stay in the draft; everything else
   keeps for next time. A stopped run is never submitted, whatever the *Submit
   for approval* toggle says — the settlement is incomplete by definition.
@@ -287,23 +351,22 @@ So a queue left running overnight is never held up by a prompt nobody is looking
 at. Both the asking and the wait are under **Settings → When something goes wrong**
 — untick it and a run never stops to ask, exactly as before.
 
-Receipts that didn't make it stay in the inbox folder, so a re-run picks up where
-the last one stopped. A re-run also re-enters the existing draft rather than
-creating a second one.
+Receipts that didn't make it stay in the settlement's `input/` folder, so a
+re-run picks up where the last one stopped, in the same draft. Each receipt
+moves to `processed/` the moment its line is saved, so even a run that crashed
+part-way leaves the settlement knowing exactly what is in the draft.
 
 ## Removing a settlement
 
-The **bin** at the left-hand end of a settlement row is the inverse of saving
-one: a settlement that has not been filed is only its folder of copied receipts,
-so removing it deletes that folder.
+The **bin** at the left-hand end of a settlement row deletes the settlement's
+folder: the receipts copied into it, filed or waiting, and its record.
 
-- It asks first, naming the settlement and how many receipts go with it.
-- The originals you dropped in are never touched — the inbox holds copies.
-- A settlement already filed stays listed for its result; there the bin only
-  clears the row. Hovering it says which of the two you are about to do.
+- It asks first, naming the settlement and what goes with it. For one that has
+  been filed, that includes the record of what went into its draft.
+- The originals you added are never touched. The settlement folder holds copies.
 - Removing is blocked while a run is in progress.
-- **It removes nothing in indfak2.** A draft already created there has to be
-  deleted in indfak2 itself.
+- **It removes nothing in indfak2.** A draft there, or a settlement already
+  sent, stays until you delete it in indfak2 itself.
 
 ## Appearance
 

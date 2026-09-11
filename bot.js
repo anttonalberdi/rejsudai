@@ -81,6 +81,315 @@ function readSettlementMeta(folderPath) {
 }
 
 // ---------------------------------------------------------------------------
+// SETTLEMENT FOLDER LAYOUT
+// A settlement is one folder, kept for as long as the settlement exists:
+//   .rejsudai.json   name + alias (see above)
+//   input/           documents waiting to be filed
+//   processed/       documents already in the indfak2 draft
+//   manifest.json    the settlement's record — every document filed so far,
+//                    rewritten after each one
+// Adding receipts later means putting them in input/ and running again: the
+// run reconnects to the draft the record names and carries on. A folder made
+// by hand, with its receipts loose inside, works too — loose documents count
+// as input and move to processed/ once filed.
+// ---------------------------------------------------------------------------
+const INPUT_DIR     = 'input';
+const PROCESSED_DIR = 'processed';
+const RECORD_FILE   = 'manifest.json';
+const DOC_RE        = /\.(pdf|png|jpe?g|heic)$/i;
+
+// Documents directly inside `dir`. Dot-files are skipped: macOS leaves "._x.pdf"
+// shadow files on network volumes, and they are not receipts.
+function listDocuments(dir) {
+  try {
+    return fs.readdirSync(dir, { withFileTypes: true })
+      .filter(e => e.isFile() && !e.name.startsWith('.') && DOC_RE.test(e.name))
+      .map(e => path.join(dir, e.name))
+      .sort();
+  } catch {
+    return [];
+  }
+}
+
+// What a run has to file: input/, plus anything loose in the folder itself.
+function pendingDocuments(folderPath) {
+  return [...listDocuments(path.join(folderPath, INPUT_DIR)), ...listDocuments(folderPath)];
+}
+
+// The settlement's record from earlier runs, or null before the first one. A
+// record that exists but cannot be read stops the run: without it the run
+// cannot know which draft is this settlement's or what is already in it, and
+// guessing risks filing the same receipt twice.
+function readRecord(folderPath) {
+  const file = path.join(folderPath, RECORD_FILE);
+  let text;
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch (err) {
+    if (err.code === 'ENOENT') return null;
+    throw err;
+  }
+  try {
+    return JSON.parse(text);
+  } catch (err) {
+    throw failure(`The settlement's record (${RECORD_FILE}) could not be read.`, {
+      detail: `${file}: ${err.message}`,
+      hint: 'It says which draft is this settlement\'s and what is already filed in it. Restore it from a backup, or delete it only if the draft in indfak2 is empty.',
+    });
+  }
+}
+
+// Written to a temporary file and renamed into place, so a run that dies
+// mid-write leaves the previous record rather than half of a new one.
+function writeRecord(folderPath, record) {
+  const file = path.join(folderPath, RECORD_FILE);
+  const text = JSON.stringify(record, null, 2);
+  const tmp = `${file}.tmp`;
+  try {
+    fs.writeFileSync(tmp, text);
+    fs.renameSync(tmp, file);
+  } catch {
+    fs.rmSync(tmp, { force: true });
+    fs.writeFileSync(file, text);
+  }
+  return file;
+}
+
+// The documents a record says are in the draft. `moved_to_output` is true once
+// a file has gone to processed/ (the name is from before the folder layout).
+function filedEntries(record) {
+  if (!record) return [];
+  return [...(record.invoices || []), ...(record.supporting_documents || [])].filter(e => e && e.moved_to_output);
+}
+
+// "receipt.pdf" → "receipt-2.pdf", "receipt-3.pdf", … — the first not in `taken`,
+// which it is then added to.
+function uniqueName(name, taken) {
+  const ext = path.extname(name);
+  const stem = name.slice(0, name.length - ext.length);
+  let candidate = name;
+  for (let n = 2; taken.has(candidate); n++) candidate = `${stem}-${n}${ext}`;
+  taken.add(candidate);
+  return candidate;
+}
+
+// A document's file name is its identity in the record, so a new document that
+// shares a name with one already filed is renamed before anything reads it —
+// otherwise its result would overwrite the filed one's entry. Returns the
+// documents left to file.
+function claimFileNames(folderPath, files, record) {
+  const processedDir = path.join(folderPath, PROCESSED_DIR);
+  const processed = new Set(listDocuments(processedDir).map(f => path.basename(f)));
+  const filed = new Set(filedEntries(record).map(e => e.file));
+  const taken = new Set([...processed, ...filed]);
+  const out = [];
+  for (const file of files) {
+    const base = path.basename(file);
+    if (filed.has(base) && !processed.has(base)) {
+      // The record says this one is in the draft, yet it never reached
+      // processed/: the run that filed it died before moving it. It is not a
+      // new receipt, and filing it again would claim it twice.
+      fs.mkdirSync(processedDir, { recursive: true });
+      moveFile(file, path.join(processedDir, base));
+      processed.add(base);
+      console.log(`  ${base} is already filed (the run that filed it stopped before moving it) — moved to ${PROCESSED_DIR}/.`);
+      continue;
+    }
+    if (!taken.has(base)) {
+      taken.add(base);
+      out.push(file);
+      continue;
+    }
+    const fresh = uniqueName(base, taken);
+    const dest = path.join(path.dirname(file), fresh);
+    fs.renameSync(file, dest);
+    console.log(`  ${base} has the same name as a document already in this settlement — renamed to ${fresh}.`);
+    out.push(dest);
+  }
+  return out;
+}
+
+// rename(2) within the settlement folder; copying by hand when that is refused
+// (another volume, or a mount that will not). fs.copyFileSync is no fallback: it
+// fails with ENOTSUP on SMB/virtiofs mounts.
+function moveFile(src, dest) {
+  try {
+    fs.renameSync(src, dest);
+  } catch {
+    fs.writeFileSync(dest, fs.readFileSync(src));
+    fs.unlinkSync(src);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// CLAUDE CALLS
+// Every request to Claude goes through callClaude(), which keeps what was sent,
+// what came back, the tokens Claude reported and what they cost. Each call is
+// printed to the log as it happens, and the whole list goes into the manifest
+// (`claude`) with the settlement's total — so a settlement says what its
+// paperwork cost, and a surprising answer can be traced to the prompt behind it.
+// ---------------------------------------------------------------------------
+const CLAUDE_MODEL = 'claude-opus-4-8';
+
+// USD per million tokens — Anthropic's list prices, checked 2026-09-11 against
+// https://platform.claude.com/docs/en/about-claude/pricing. Writing to the cache
+// costs 1.25× the input rate (the default 5-minute cache; 2× for the 1-hour
+// one) and reading from it 0.1×. A model that is not listed here is logged
+// without a cost rather than with a wrong one.
+const CLAUDE_PRICES = {
+  'claude-opus-4-8':  { input: 5, output: 25 },
+  'claude-opus-5':    { input: 5, output: 25 },
+  'claude-sonnet-5':  { input: 2, output: 10 },
+  'claude-haiku-4-5': { input: 1, output: 5 },
+};
+const CACHE_WRITE_5M = 1.25;
+const CACHE_WRITE_1H = 2;
+const CACHE_READ     = 0.1;
+
+const CLAUDE_LOG = [];
+// Long prompt text already printed in full, and the call it was printed with.
+// The parsing instruction is the same for every document: the log prints it
+// once and points back to it after that. The manifest always has it in full.
+const CLAUDE_TEXT_SHOWN = new Map();
+
+const roundUsd = usd => Math.round(usd * 1e6) / 1e6;
+const fmtTokens = n => n.toLocaleString('en-US');
+const fmtUsd = usd => (usd === null ? 'no price on file' : `$${usd.toFixed(4)}`);
+
+function claudeCost(model, usage) {
+  const price = CLAUDE_PRICES[model];
+  if (!price) return null;
+  const written   = usage.cache_creation_input_tokens || 0;
+  const written1h = Math.min(written, (usage.cache_creation && usage.cache_creation.ephemeral_1h_input_tokens) || 0);
+  return roundUsd((
+    (usage.input_tokens || 0) * price.input
+    + (written - written1h) * price.input * CACHE_WRITE_5M
+    + written1h * price.input * CACHE_WRITE_1H
+    + (usage.cache_read_input_tokens || 0) * price.input * CACHE_READ
+    + (usage.output_tokens || 0) * price.output
+  ) / 1e6);
+}
+
+// A prompt block as a person would read it. Documents and images travel as
+// base64, which is no use in a log or a manifest, so they are named instead.
+function claudeBlockText(block) {
+  if (typeof block === 'string') return block;
+  if (block.type === 'text') return block.text;
+  if (block.source && block.source.type === 'base64') {
+    const kb = Math.max(1, Math.round(block.source.data.length * 0.75 / 1024));
+    return `[${block.type} attached: ${block.source.media_type}, ${kb} KB]`;
+  }
+  return `[${block.type}]`;
+}
+
+const claudeBlocks = content => (Array.isArray(content) ? content : [content]);
+const claudePromptText = content => claudeBlocks(content).map(claudeBlockText).join('\n\n');
+
+function printClaudeCall(call, params) {
+  const indent = text => String(text).split('\n').map(line => `        ${line}`).join('\n');
+  const shown = block => {
+    const text = claudeBlockText(block);
+    const isText = typeof block === 'string' || block.type === 'text';
+    if (!isText || text.length < 200) return text;
+    const first = CLAUDE_TEXT_SHOWN.get(text);
+    if (first) return `(the same text as in Claude #${first})`;
+    CLAUDE_TEXT_SHOWN.set(text, call.n);
+    return text;
+  };
+  const out = [`\n  Claude #${call.n} · ${call.purpose}${call.subject ? ` · ${call.subject}` : ''} · ${call.model}`];
+  if (params.system) out.push('    Sent — system:', indent(claudeBlocks(params.system).map(shown).join('\n\n')));
+  for (const m of params.messages) out.push(`    Sent — ${m.role}:`, indent(claudeBlocks(m.content).map(shown).join('\n\n')));
+  const secs = `${(call.duration_ms / 1000).toFixed(1)} s`;
+  if (call.error) {
+    out.push(`    No reply — the call failed after ${secs}: ${call.error}`);
+  } else {
+    const t = call.tokens;
+    out.push(`    Received — ${call.stop_reason}, ${secs}:`, indent(call.reply));
+    out.push(`    Tokens: ${fmtTokens(t.input)} in · ${fmtTokens(t.output)} out · cache ${fmtTokens(t.cache_write)} written / ${fmtTokens(t.cache_read)} read — est. ${fmtUsd(call.estimated_cost_usd)}`);
+  }
+  console.log(out.join('\n'));
+}
+
+// messages.create(), on the record. `purpose` says which step asked (the
+// function's name) and `subject` what about — the file, the settlement.
+async function callClaude({ purpose, subject = null }, params) {
+  const call = {
+    n: CLAUDE_LOG.length + 1, at: new Date().toISOString(), purpose, subject, model: params.model,
+    system: params.system ? claudePromptText(params.system) : null,
+    messages: params.messages.map(m => ({ role: m.role, text: claudePromptText(m.content) })),
+    reply: null, stop_reason: null, tokens: null, estimated_cost_usd: null, duration_ms: null, error: null,
+  };
+  CLAUDE_LOG.push(call);
+  const started = Date.now();
+  let msg;
+  try {
+    msg = await anthropic.messages.create(params);
+  } catch (err) {
+    call.duration_ms = Date.now() - started;
+    call.error = String(err && err.message || err).split('\n')[0];
+    call.estimated_cost_usd = 0;   // a request that ends in an error is not billed
+    printClaudeCall(call, params);
+    throw err;
+  }
+  const usage = msg.usage || {};
+  call.duration_ms = Date.now() - started;
+  call.reply = msg.content.filter(b => b.type === 'text').map(b => b.text).join('\n');
+  call.stop_reason = msg.stop_reason;
+  call.tokens = {
+    input: usage.input_tokens || 0,
+    cache_write: usage.cache_creation_input_tokens || 0,
+    cache_read: usage.cache_read_input_tokens || 0,
+    output: usage.output_tokens || 0,
+  };
+  call.estimated_cost_usd = claudeCost(params.model, usage);
+  printClaudeCall(call, params);
+  return msg;
+}
+
+// The manifest's `claude` section: the settlement's total, the rates it was
+// worked out with, and every call in full.
+function claudeRecord() {
+  const total = key => CLAUDE_LOG.reduce((n, c) => n + (c.tokens ? c.tokens[key] : 0), 0);
+  const models = [...new Set(CLAUDE_LOG.map(c => c.model))];
+  return {
+    estimated_cost_usd: roundUsd(CLAUDE_LOG.reduce((n, c) => n + (c.estimated_cost_usd || 0), 0)),
+    tokens: { input: total('input'), cache_write: total('cache_write'), cache_read: total('cache_read'), output: total('output') },
+    rates_usd_per_mtok: Object.fromEntries(models.map(m => {
+      const p = CLAUDE_PRICES[m];
+      return [m, p ? { input: p.input, cache_write: p.input * CACHE_WRITE_5M, cache_read: p.input * CACHE_READ, output: p.output } : null];
+    })),
+    note: 'Token counts are the ones Claude reported. The cost is estimated from Anthropic list prices; the Anthropic invoice is what counts.',
+    calls: CLAUDE_LOG,
+  };
+}
+
+// A settlement filed over several runs keeps one `claude` section: the earlier
+// runs' calls and this run's, and the total of all of them.
+function mergeClaude(before, now) {
+  if (!before || !Array.isArray(before.calls) || !before.calls.length) return now;
+  const sum = key => ((before.tokens || {})[key] || 0) + ((now.tokens || {})[key] || 0);
+  return {
+    estimated_cost_usd: roundUsd((before.estimated_cost_usd || 0) + (now.estimated_cost_usd || 0)),
+    tokens: { input: sum('input'), cache_write: sum('cache_write'), cache_read: sum('cache_read'), output: sum('output') },
+    rates_usd_per_mtok: { ...(before.rates_usd_per_mtok || {}), ...now.rates_usd_per_mtok },
+    note: now.note,
+    calls: [...before.calls, ...now.calls],
+  };
+}
+
+// The same total, for the end of the log — printed whether or not the run got
+// as far as writing a manifest, since a failed run was paid for too.
+function printClaudeTotals() {
+  if (!CLAUDE_LOG.length) return;
+  const r = claudeRecord();
+  const failed = CLAUDE_LOG.filter(c => c.error).length;
+  const calls = CLAUDE_LOG.length === 1 ? '1 call' : `${CLAUDE_LOG.length} calls`;
+  console.log(`\nClaude for this settlement: ${calls}${failed ? ` (${failed} failed)` : ''} · `
+    + `${fmtTokens(r.tokens.input)} tokens in, ${fmtTokens(r.tokens.output)} out · `
+    + `cache ${fmtTokens(r.tokens.cache_write)} written / ${fmtTokens(r.tokens.cache_read)} read — est. ${fmtUsd(r.estimated_cost_usd)}`);
+}
+
+// ---------------------------------------------------------------------------
 // 1. PARSE INVOICE with Claude vision
 // ---------------------------------------------------------------------------
 
@@ -109,8 +418,8 @@ async function parseInvoice(filePath) {
   // Instruction placed BEFORE the document so cache_control caches just the
   // instruction text. Subsequent calls with different documents hit this cache,
   // avoiding re-billing the instruction tokens each time.
-  const msg = await anthropic.messages.create({
-    model: 'claude-opus-4-8',
+  const msg = await callClaude({ purpose: 'parse_invoice', subject: path.basename(filePath) }, {
+    model: CLAUDE_MODEL,
     max_tokens: 1024,
     messages: [{
       role: 'user',
@@ -118,7 +427,7 @@ async function parseInvoice(filePath) {
         {
           type: 'text',
           text: `Extract from this expense document and reply ONLY with a JSON object (no markdown):
-{"document_kind": "invoice" | "receipt" | "itinerary" | "booking_confirmation" | "event_document" | "other",
+{"document_kind": "invoice" | "receipt" | "ticket" | "itinerary" | "booking_confirmation" | "event_document" | "other",
  "vendor": "short vendor name",
  "vendor_country": "full country name where the vendor is located, e.g. 'Denmark', 'Finland', 'Germany', or null if not determinable from address/locale on the document",
  "date": "YYYY-MM-DD",
@@ -132,8 +441,10 @@ Rules:
 - "date" is the date the PAYMENT happened (purchase/issue/charge date), NOT a service, travel or check-out date. A trip booked in April but flown in May has date in April on its booking invoice.
 - "amount" is the total actually paid in the payment currency.
 - "vendor_country": infer from the vendor's printed address (street, postal code, city, country line) or from locale clues (language of receipt, local tax labels like 'Moms', 'MwSt', 'VAT'). Danish postal codes are 4-digit numbers 1000–9990; 'Kbh', 'København', 'Aarhus', 'Odense' etc. mean Denmark. For online/global vendors with no physical address shown, set null.
-- Documents that are not themselves proof of a payment (itineraries, e-tickets, booking confirmations, event programmes, participant lists) get document_kind accordingly and amount/currency/payment_method null (amounts printed on them are informational).
-- For itineraries/e-tickets also include "travel": {"start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD", "origin_city": "...", "origin_country": "...", "destination_city": "...", "destination_country": "..."} describing the whole trip (outbound departure to final return); omit for other documents.
+- "ticket" is a travel ticket or e-ticket (train, flight, bus, ferry); "booking_confirmation" confirms a reservation (hotel, car, package); "itinerary" is a trip overview, e.g. from a travel agency.
+- Tickets and booking confirmations: "amount"/"currency" are the total price printed on the document — every ticket, seat reservation and fee on it added together — and "date" is the purchase/issue date printed on it. A ticket bought directly is often the only record of what the journey cost, so its price must not be dropped; whether it duplicates an invoice is decided later, with all the documents in view. Leave amount/currency null only when the document shows no price, or says the price is still to be paid (e.g. "pay at the hotel").
+- Itineraries, event programmes and participant lists are not proof of a payment: amount/currency/payment_method null (a fare or fee printed on them is informational).
+- For itineraries and tickets also include "travel": {"start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD", "origin_city": "...", "origin_country": "...", "destination_city": "...", "destination_country": "..."} describing the whole trip (outbound departure to final return); omit for other documents.
 - "keywords" must be 2-6 short strings that could appear in the card-statement descriptor for this charge: the vendor brand, parent/legal company name, product or service names, and web domains mentioned on the document. Example: an Anthropic invoice for a Claude.ai subscription -> ["Anthropic", "Claude.ai", "Claude"]. NEVER include generic words that other merchants' descriptors could also contain: no city/country names, no payment-terminal brands (Verifone, Nets), no generic words like "hotel" or "restaurant" on their own.`,
           cache_control: { type: 'ephemeral' },
         },
@@ -150,8 +461,15 @@ Rules:
 // 1b. SETTLEMENT PLAN — one Claude call over all parsed documents decides, per
 // file, whether it is a card expense, an out-of-pocket expense ("Normal cost"),
 // or a supporting document to attach to one of the expense lines.
+//
+// `filed` is what earlier runs already put in this settlement's draft (entries
+// from its record). The plan sees them so a document added later that covers a
+// cost already filed — the e-ticket for a flight whose invoice went in last
+// week — is recognised as evidence rather than filed a second time. When there
+// are filed documents the draft exists, so its travel window (`draftTravel`)
+// is fixed and the plan is told so.
 // ---------------------------------------------------------------------------
-async function planSettlement(docs, settlementName) {
+async function planSettlement(docs, settlementName, { filed = [], draftTravel = null } = {}) {
   const docList = docs.map(d => ({
     file: path.basename(d.filePath),
     document_kind: d.document_kind || null,
@@ -164,15 +482,17 @@ async function planSettlement(docs, settlementName) {
     travel: d.travel || null,
   }));
 
-  const msg = await anthropic.messages.create({
-    model: 'claude-opus-4-8',
+  const msg = await callClaude({ purpose: 'plan_settlement', subject: settlementName }, {
+    model: CLAUDE_MODEL,
     max_tokens: 1024,
     system: [{
       type: 'text',
       text: `You plan how to file expense settlements in a travel-expense system (indfak2).
 The employee's corporate card is: ${CORPORATE_CARD}. Costs paid with it (or invoiced to a corporate travel account) appear as card transactions in the system and are filed as "From card transaction". Costs paid personally (cash or a personal card) never appear there and are filed as "Normal cost" (out-of-pocket reimbursement).
-Documents that are not proof of a payment (itineraries, e-tickets, booking confirmations, event programmes, participant lists) are supporting documents: not expense lines, but attached to one of the expense lines as evidence.
+Every cost is filed exactly once — never dropped, never twice.
 If two documents cover the same cost (e.g. an e-ticket and the agency invoice sharing a booking reference), the invoice is the expense and the other is supporting, attached to it.
+A ticket or booking confirmation with a price is the evidence of that cost when no invoice or receipt in the settlement covers the same booking: it is then an expense line, not supporting — usually "unknown_expense", since tickets rarely show how they were paid. A train ticket bought directly from the operator is the typical case.
+Documents with no price of their own (itineraries, event programmes, participant lists) are supporting documents: not expense lines, but attached to one of the expense lines as evidence.
 
 Reply ONLY with JSON (no markdown):
 {"travel": {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD", "origin_city": "...", "origin_country": "...", "destination_city": "...", "destination_country": "..."} | null,
@@ -182,12 +502,12 @@ Reply ONLY with JSON (no markdown):
 - "card_expense": clearly paid with the corporate card / corporate travel account.
 - "pocket_expense": clearly paid personally (cash or a card that is not the corporate card).
 - "unknown_expense": a real cost but the payment method cannot be determined.
-- "supporting": not an expense line; set attach_to to the most related expense file, or null for any.`,
+- "supporting": not an expense line — a document with no price, or one whose cost another document here already files; set attach_to to the most related expense file, or null for any.`,
       cache_control: { type: 'ephemeral' },
     }],
     messages: [{
       role: 'user',
-      content: `Settlement: "${settlementName}"\n\nDocuments:\n${JSON.stringify(docList, null, 2)}`,
+      content: planPrompt(settlementName, docList, filed, draftTravel),
     }]
   });
 
@@ -200,7 +520,63 @@ Reply ONLY with JSON (no markdown):
     d.attach_to = p ? p.attach_to : null;
     d.plan_reason = p ? p.reason : 'not mentioned in plan — defaulted';
   }
+
+  // Tickets carry their price now, so what keeps a CWT e-ticket from being
+  // filed beside the CWT invoice for the same flight is the plan's
+  // shared-reference rule. A double claim is too costly to rest on one prompt:
+  // a ticket the plan made an expense that shares a booking reference with an
+  // invoice or receipt that is also an expense goes back to supporting.
+  // The invoices and receipts an earlier run filed count here too: the booking
+  // they paid for is in the draft already.
+  const refKey = r => String(r).replace(/\s+/g, '').toUpperCase();
+  const isPayment = kind => ['invoice', 'receipt'].includes(kind);
+  const payments = [
+    ...docs.filter(d => d.role !== 'supporting' && isPayment(d.document_kind))
+      .map(d => ({ file: path.basename(d.filePath), references: d.references || [], filed: false })),
+    ...filed.filter(e => e.expense_type && isPayment((e.parsed_invoice || {}).document_kind))
+      .map(e => ({ file: e.file, references: (e.parsed_invoice || {}).references || [], filed: true })),
+  ];
+  for (const d of docs) {
+    if (d.role === 'supporting' || !['ticket', 'booking_confirmation', 'itinerary'].includes(d.document_kind)) continue;
+    const mine = new Set((d.references || []).map(refKey).filter(r => r.length >= 5));
+    const payment = payments.find(p => p.references.some(r => mine.has(refKey(r))));
+    if (!payment) continue;
+    const shared = payment.references.find(r => mine.has(refKey(r)));
+    d.role = 'supporting';
+    d.attach_to = payment.file;
+    d.plan_reason = `shares booking reference ${shared} with ${payment.file}, which ${payment.filed ? 'is already filed' : 'files this cost'}`;
+  }
   return { travel: plan.travel || null };
+}
+
+// The plan's user message. The documents already in the draft go before the
+// new ones, as context the reply must not list.
+function planPrompt(settlementName, docList, filed, draftTravel) {
+  const parts = [`Settlement: "${settlementName}"`];
+  if (filed.length) {
+    const filedList = filed.map(e => {
+      const p = e.parsed_invoice || {};
+      return {
+        file: e.file,
+        filed_as: e.expense_type || `supporting document${e.attached_to ? ` attached to ${e.attached_to}` : ''}`,
+        document_kind: p.document_kind || null,
+        vendor: p.vendor || null,
+        date: p.date || null,
+        amount: p.amount ?? null,
+        currency: p.currency || null,
+        references: p.references || [],
+      };
+    });
+    parts.push('This settlement already has a draft in indfak2, and these documents are filed in it. They are context only: '
+      + 'do not list them in "documents". A new document covering a cost already filed here — the same booking reference, '
+      + 'or the same vendor, amount and date — is "supporting": the cost must not be filed twice.\n'
+      + JSON.stringify(filedList, null, 2));
+    parts.push(draftTravel
+      ? `The draft's travel window is fixed: ${JSON.stringify(draftTravel)}. Return it as "travel".`
+      : 'The draft is not a travel settlement: return "travel": null.');
+  }
+  parts.push(`${filed.length ? 'New documents to file' : 'Documents'}:\n${JSON.stringify(docList, null, 2)}`);
+  return parts.join('\n\n');
 }
 
 // ---------------------------------------------------------------------------
@@ -210,8 +586,8 @@ Reply ONLY with JSON (no markdown):
 // ---------------------------------------------------------------------------
 async function pickOption(options, context, instruction) {
   try {
-    const msg = await anthropic.messages.create({
-      model: 'claude-opus-4-8',
+    const msg = await callClaude({ purpose: 'pick_option' }, {
+      model: CLAUDE_MODEL,
       max_tokens: 16,
       system: [{
         type: 'text',
@@ -940,6 +1316,27 @@ async function openExpenseModule(page) {
   return { outer, inner };
 }
 
+// The drafts grid's name cell for one draft, and every name the grid shows (for
+// a report when it is not there). Names are compared whole — case and runs of
+// whitespace aside — because a substring match lets "* Oslo" open
+// "* Oslo Workshop", and a run that reconnects to its draft must never file
+// into someone else's. The first *visible* match wins: ui-grid can render a
+// cell twice.
+const sameDraftName = (a, b) => String(a).replace(/\s+/g, ' ').trim().toLowerCase()
+  === String(b).replace(/\s+/g, ' ').trim().toLowerCase();
+
+async function findDraftCell(inner, name) {
+  const cells = inner.locator('#inner-draft-container .ui-grid-row h4');
+  const texts = await cells.allTextContents().catch(() => []);
+  const names = [...new Set(texts.map(t => t.trim()).filter(Boolean))];
+  for (let i = 0; i < texts.length; i++) {
+    if (!sameDraftName(texts[i], name)) continue;
+    const cell = cells.nth(i);
+    if (await cell.isVisible().catch(() => false)) return { cell, names };
+  }
+  return { cell: null, names };
+}
+
 // ---------------------------------------------------------------------------
 // 5. LINE-ITEMS TAB + FAB HELPERS
 // ---------------------------------------------------------------------------
@@ -949,10 +1346,10 @@ async function ensureLineItemsTab(inner, draftName = null) {
 
   // Recovery: if on draft list (e.g. after a previous Escape), re-enter the draft first.
   if (await inner.locator('#inner-draft-container').isVisible().catch(() => false) && draftName) {
-    const draftLink = inner.locator('#inner-draft-container .ui-grid-row h4, #inner-draft-container a').filter({ hasText: draftName }).first();
-    if (await draftLink.isVisible().catch(() => false)) {
+    const { cell } = await findDraftCell(inner, draftName);
+    if (cell) {
       console.log(`  Re-entering draft "${draftName}".`);
-      await draftLink.click();
+      await cell.click();
       await new Promise(r => setTimeout(r, 800));
     }
   }
@@ -1349,8 +1746,8 @@ ${existingDrafts.map((d, i) => `${i}: "${d.text}"`).join('\n')}
 Which draft (by index) should this invoice be added to? Reply with just the index number, or "new" if none is suitable. A draft is suitable if it clearly covers the same type of expense or period.`;
 
   // Static system prompt cached so repeated calls in the same session are cheaper
-  const msg = await anthropic.messages.create({
-    model: 'claude-opus-4-8',
+  const msg = await callClaude({ purpose: 'pick_draft', subject: invoice.vendor }, {
+    model: CLAUDE_MODEL,
     max_tokens: 16,
     system: [{
       type: 'text',
@@ -1789,10 +2186,19 @@ async function createNormalCostLine(page, inner, invoice, uploadPath, opts = {})
 
   // Date — must lie within the settlement's Departure/Arrival window (set from
   // the plan's trip dates in fillNewDraft), otherwise the save is rejected with
-  // a misleading "Invalid date. Format: M/DD/YYYY" error.
+  // a misleading "Invalid date. Format: M/DD/YYYY" error. A cost paid outside
+  // it — a train ticket bought weeks ahead — is dated at the nearer end of the
+  // trip; the description above keeps the date it was actually paid.
+  const travel = opts.travel || {};
+  let lineDate = invoice.date;
+  if (lineDate && travel.start && lineDate < travel.start) lineDate = travel.start;
+  if (lineDate && travel.end && lineDate > travel.end) lineDate = travel.end;
   const dateBox = inner.getByRole('textbox', { name: /date/i }).first();
-  if (await dateBox.count() && invoice.date) {
-    const v = await typeDateInto(dateBox, invoice.date);
+  if (await dateBox.count() && lineDate) {
+    if (lineDate !== invoice.date) {
+      console.log(`  Paid ${invoice.date}, outside the travel window (${travel.start} → ${travel.end}) — dating the line ${lineDate}.`);
+    }
+    const v = await typeDateInto(dateBox, lineDate);
     console.log(`  Date set to "${v}" (invoice date ${invoice.date}).`);
   }
 
@@ -1864,6 +2270,7 @@ async function createNormalCostLine(page, inner, invoice, uploadPath, opts = {})
   const fields = await readFormFields(inner);
   fields['Attachment'] = path.basename(uploadPath);
   if (extraNames.length) fields['Extra attachments'] = extraNames.join(', ');
+  if (lineDate !== invoice.date) fields['Date note'] = `Paid ${invoice.date}; dated ${lineDate} to fall inside the travel window`;
   console.log(`  Normal-cost form snapshot: ${JSON.stringify(fields)}`);
 
   const lineErrors = await saveLineAndVerify(inner, `normal-cost save (${invoice.vendor})`);
@@ -1978,6 +2385,10 @@ async function runSingle(page, invoicePath) {
       }
     }
   }
+
+  // Last, so it holds every call the run made and the bulky prompts sit at the
+  // end of the file.
+  manifest.claude = claudeRecord();
 
   const manifestPath = path.join(CLAIMS_OUTPUT, `${invoice.date}_${invoice.vendor.replace(/[^a-z0-9]/gi, '_')}_${Date.now()}.json`);
   fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
@@ -2163,36 +2574,169 @@ async function submitSettlement(page, outer, inner, draftName) {
 
 // ---------------------------------------------------------------------------
 // FOLDER RUN
-// Reads the settlement's name and alias (see readSettlementMeta) and creates
-// one draft for all documents in the folder. A Claude planning step decides per
+// Files whatever is waiting in the settlement's input/ into its one draft (see
+// SETTLEMENT FOLDER LAYOUT). The first run creates the draft; every later one
+// — receipts added since, or ones that failed last time — reconnects to the
+// draft its record names and carries on. A Claude planning step decides per
 // document whether it is a card expense (matched to a card transaction), an
 // out-of-pocket expense (entered as a "Normal cost" line), or a supporting
-// document (attached to the first successful expense line).
+// document (attached to the first successful expense line), with what is
+// already filed in view so that nothing is claimed twice.
 // ---------------------------------------------------------------------------
+
+// What a folder run needs before a browser is worth starting: something to
+// file, and a settlement that can still take it. run() calls it before
+// Chromium launches, and runFolder() again for the record and the file list.
+function checkFolder(folderPath) {
+  const { settlementName } = readSettlementMeta(folderPath);
+  const record = readRecord(folderPath);
+  const s = (record && record.settlement) || {};
+  if (s.submit && s.submit.submitted) {
+    throw failure(`"${s.draft_name || settlementName}" has already been sent for approval.`, {
+      detail: 'A settlement cannot take more receipts once it has left the drafts list.',
+      hint: 'File the new receipts as a settlement of their own.',
+    });
+  }
+  const files = pendingDocuments(folderPath);
+  if (!files.length) {
+    throw failure(`Nothing to file in "${settlementName}".`, {
+      detail: `No PDF, PNG, JPEG or HEIC documents are waiting in ${path.join(path.basename(folderPath), INPUT_DIR)}.`,
+      hint: record
+        ? 'Everything in this settlement is already filed. Add receipts to it to file more.'
+        : 'Add the receipts to the settlement, then run it again.',
+    });
+  }
+  return { record, files };
+}
+
+// The fields the record keeps from each parse. `references` and `travel` are
+// what a later run's plan needs to recognise a cost this settlement has
+// already filed.
+function parsedFields(d) {
+  return {
+    vendor: d.vendor ?? null,
+    vendor_country: d.vendor_country || null,
+    amount: d.amount ?? null,
+    currency: d.currency || null,
+    date: d.date || null,
+    document_kind: d.document_kind || null,
+    payment_method: d.payment_method || null,
+    references: d.references || [],
+    keywords: d.keywords || [],
+    travel: d.travel || null,
+  };
+}
+
+// The settlement's record: the one earlier runs left (`prev`, null before the
+// first) with this run laid over it. Only filed entries carry over — an
+// earlier failure is either being tried again in this run, because its file is
+// still in input/, or its file is gone and so is the point of listing it. A
+// document tried again replaces its old entry.
+//
+// `run` is everything this run knows: its results, its supporting documents,
+// the files it has moved to processed/ (`filed`), what is still waiting in
+// input/, its submit outcome, questions and Claude calls. `final` is false for
+// the saves made along the way, whose status is written for the case where the
+// run dies before the next one.
+function composeRecord(prev, run) {
+  prev = prev || {};
+  const ps = prev.settlement || {};
+  const now = new Set([...run.results.map(r => r.file), ...run.supporting.map(s => s.file)]);
+  const kept = list => (list || []).filter(e => e && e.moved_to_output && !now.has(e.file));
+  const invoices = [...kept(prev.invoices), ...run.results];
+  const supporting = [...kept(prev.supporting_documents), ...run.supporting];
+  const filedLines = invoices.filter(i => i.moved_to_output);
+  const { waiting, submit } = run;
+  const status = submit.submitted ? 'SUBMITTED — sent for approval'
+    : !run.final ? `DRAFT — filing was interrupted; ${waiting.length} document(s) still waiting in ${INPUT_DIR}/`
+    : waiting.length ? `DRAFT — ${waiting.length} document(s) not filed yet, waiting in ${INPUT_DIR}/`
+    : submit.requested ? `DRAFT — submit was requested but did not happen (${submit.skipped_reason || submit.errors.join(' | ')})`
+    : 'DRAFT — every document is filed; review it and submit it in indfak2';
+  return {
+    manifest_version: 2,
+    mode: 'folder',
+    run_at: run.runAt,
+    updated_at: new Date().toISOString(),
+    settlement: {
+      draft_name: run.draftName,
+      settlement_number: run.settlementNumber || ps.settlement_number || null,
+      original_folder: run.folderName,
+      alias: run.alias,
+      type: run.header.type,
+      purpose: run.header.purpose,
+      travel: run.travel,
+      created_at: run.header.created_at,
+      form_fields_entered: run.header.form_fields_entered,
+      save_errors: run.header.save_errors,
+      expenses_total: invoices.length,
+      expenses_card: filedLines.filter(r => r.expense_type === 'From Card Transaction').length,
+      expenses_normal_cost: filedLines.filter(r => r.expense_type === 'Normal Cost').length,
+      expenses_unprocessed: invoices.length - filedLines.length,
+      documents_waiting: waiting,
+      submit,
+      // What a person was asked while filing this settlement, and what they
+      // answered — so a settlement someone steered by hand says so.
+      questions: [...(ps.questions || []), ...run.questions],
+      status,
+    },
+    invoices,
+    supporting_documents: supporting,
+    // One entry per run that has filed into this settlement.
+    runs: [...(prev.runs || []), {
+      run_at: run.runAt,
+      finished: !!run.final,
+      documents: run.documents,
+      filed: run.filed,
+      submit: run.final ? submit : null,
+      claude_estimated_cost_usd: run.claude.estimated_cost_usd,
+    }],
+    // Every Claude call the settlement has taken, across all its runs, and the
+    // total. Last, because the prompts are long.
+    claude: mergeClaude(prev.claude, run.claude),
+  };
+}
+
 async function runFolder(page, folderPath) {
   const folderName = path.basename(folderPath);
   const { alias, settlementName } = readSettlementMeta(folderPath);
-
-  const files = fs.readdirSync(folderPath)
-    .filter(f => /\.(pdf|png|jpe?g|heic)$/i.test(f))
-    .map(f => path.join(folderPath, f));
-
-  if (files.length === 0) throw new Error(`No invoice files found in ${folderPath}`);
+  const { record, files: found } = checkFolder(folderPath);
+  const files = claimFileNames(folderPath, found, record);
+  if (files.length === 0) {
+    throw failure(`Nothing to file in "${settlementName}".`, {
+      detail: `Everything in ${path.join(folderName, INPUT_DIR)} turned out to be filed already.`,
+      hint: 'Add receipts to the settlement to file more.',
+    });
+  }
 
   console.log(`\nFolder: ${folderName}`);
   console.log(`  Alias:           ${alias || '(from config)'}`);
   console.log(`  Settlement name: ${settlementName}`);
-  console.log(`  Documents found: ${files.length}`);
+  console.log(`  Documents to file: ${files.length}`);
 
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rejsudai-'));
   try {
-    await runFolderInner(page, folderPath, folderName, alias, settlementName, files, tmpDir);
+    await runFolderInner(page, folderPath, folderName, alias, settlementName, files, tmpDir, record);
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 }
 
-async function runFolderInner(page, folderPath, folderName, alias, settlementName, files, tmpDir) {
+async function runFolderInner(page, folderPath, folderName, alias, settlementName, files, tmpDir, record) {
+  const runAt = new Date().toISOString();
+  const processedDir = path.join(folderPath, PROCESSED_DIR);
+  // The record as this run found it. Every save lays this run over this
+  // snapshot — never over the previous save — so nothing is counted twice.
+  const prev = record || {};
+  const prevSettlement = prev.settlement || {};
+  const filedBefore = filedEntries(record);
+  // The record names a draft: an earlier run made it, and this one belongs in it.
+  const continuing = !!prevSettlement.draft_name;
+  if (continuing) {
+    console.log(`  Continuing draft "${prevSettlement.draft_name}"`
+      + `${prevSettlement.settlement_number ? ` (no. ${prevSettlement.settlement_number})` : ''}`
+      + ` — ${filedBefore.length} document(s) already filed in it.`);
+  }
+
   // Parse all documents up-front (before opening the browser flow)
   const docs = [];
   // Documents left out by hand at this stage. They go back into the manifest at
@@ -2208,7 +2752,7 @@ async function runFolderInner(page, folderPath, folderName, alias, settlementNam
       retry: 'Try reading it again',
       retryDetail: 'Sends the document to Claude again — worth a try when the cause was a rate limit or a network blip.',
       extra: { value: 'leave_out', label: 'Leave this document out',
-               detail: 'The rest of the folder is filed. This file stays in the inbox and is listed as unread in the manifest.' },
+               detail: `The rest is filed. This file stays in ${INPUT_DIR}/ and is listed as unread in the manifest.` },
     }, async () => {
       setStep('parsing', `reading ${path.basename(f)}`);
       const prep = await prepareFile(f, tmpDir);
@@ -2223,22 +2767,22 @@ async function runFolderInner(page, folderPath, folderName, alias, settlementNam
     console.log(`    → [${parsed.document_kind}] ${parsed.vendor}  ${parsed.amount} ${parsed.currency}  ${parsed.date}  pay: ${parsed.payment_method || '?'}`);
     docs.push(parsed);
   }
-  if (docs.length === 0) throw failure('None of the documents in the folder could be read.', {
-    hint: 'The files stay in the inbox. Check they are readable invoices or receipts, then run the settlement again.',
+  if (docs.length === 0) throw failure('None of the documents to file could be read.', {
+    hint: `The files stay in ${INPUT_DIR}/. Check they are readable invoices or receipts, then run the settlement again.`,
   });
 
   // Plan the settlement: card expense / out-of-pocket expense / supporting doc
   rejsudaiEmit('phase', { phase: 'planning' });
-  const { travel } = await runStage(page, {
+  const { travel: plannedTravel } = await runStage(page, {
     question: 'Working out what each document is failed. What should the run do?',
     retry: 'Try planning again',
     retryDetail: 'Asks Claude again with the same documents — worth a try when the cause was a rate limit or a network blip.',
   }, async () => {
     setStep('planning', 'working out what each document is');
-    return planSettlement(docs, settlementName);
+    return planSettlement(docs, settlementName, { filed: filedBefore, draftTravel: prevSettlement.travel || null });
   });
   console.log('\nSettlement plan:');
-  if (travel) console.log(`  Travel: ${travel.origin_city} (${travel.origin_country}) → ${travel.destination_city} (${travel.destination_country}), ${travel.start} → ${travel.end}`);
+  if (plannedTravel) console.log(`  Travel: ${plannedTravel.origin_city} (${plannedTravel.origin_country}) → ${plannedTravel.destination_city} (${plannedTravel.destination_country}), ${plannedTravel.start} → ${plannedTravel.end}`);
   for (const d of docs) console.log(`  ${d.role.padEnd(15)} ${path.basename(d.filePath)} — ${d.plan_reason}`);
 
   // Card-matched (and unknown) expenses first, out-of-pocket last: an unmatched
@@ -2249,56 +2793,103 @@ async function runFolderInner(page, folderPath, folderName, alias, settlementNam
     ...docs.filter(d => d.role === 'pocket_expense'),
   ];
   const supporting = docs.filter(d => d.role === 'supporting');
-  if (expenses.length === 0) throw new Error('Plan found no expense documents in the folder.');
+  // Supporting documents ride on an expense line filed in the same run, and a
+  // line already in the draft cannot be given one — so a batch of nothing but
+  // evidence has nowhere to go.
+  if (expenses.length === 0) {
+    throw failure('None of the documents is a cost of its own, so there is no line to attach them to.', {
+      detail: `Every document was read as supporting evidence: ${supporting.map(d => `${path.basename(d.filePath)} (${d.plan_reason})`).join('; ')}.`,
+      hint: continuing
+        ? `Supporting documents are attached to an expense line filed in the same run, and cannot be added to a line already in the draft. Attach them in indfak2 by hand and delete them from ${INPUT_DIR}/, or add them together with the cost they belong to.`
+        : 'Check that the settlement includes the invoices or receipts, not only itineraries and confirmations.',
+    });
+  }
 
   // Opening the module and getting a draft to file into is one stage: it is
-  // safe to run again from the top, because the draft-reuse below is what a
-  // re-run after a crash does anyway — a draft this run half-created is
-  // re-entered by name rather than duplicated.
-  // The alias the draft ends up with, which is not always the one asked for: a
+  // safe to run again from the top. A settlement with a record reconnects to
+  // the draft the record names; one without looks for a draft of its name — a
+  // run that died before its first save — and makes one only when there is
+  // none. The alias the draft ends up with is not always the one asked for: a
   // rejected alias can be answered with another (askAboutAlias). It lives out
   // here because a second attempt at this stage re-enters the draft the first
   // one created instead of filling the form again.
   let aliasUsed = alias || PROJECT_ALIAS;
-  const { outer, inner, draftName, formFields, saveErrors, settlementNumber } = await runStage(page, {
+  const { outer, inner, draftName, formFields, saveErrors, settlementNumber, reconnected } = await runStage(page, {
     question: 'Setting up the draft in indfak2 failed. What should the run do?',
     retry: 'Try the draft again',
-    retryDetail: 'Goes back to the drafts list and starts over. A draft this run already created is re-entered, not duplicated.',
+    retryDetail: 'Goes back to the drafts list and starts over. A draft this settlement already has is re-entered, never duplicated.',
   }, async () => {
     const { outer, inner } = await openExpenseModule(page);
-
-    // Reuse an existing draft with this name (left over from a crashed run) so a
-    // re-run continues into the same settlement instead of creating a duplicate.
-    // The draft list is a ui-grid: names are h4 cells inside .ui-grid-row (NOT
-    // links). Clicking the name cell opens the draft.
-    const intendedName = `* ${settlementName}`;
+    const intendedName = continuing ? prevSettlement.draft_name : `* ${settlementName}`;
+    setStep('draft', `looking for the draft "${intendedName}"`);
+    // Rows render after the container appears; a timeout here just means there
+    // are no drafts yet.
     await inner.locator('#inner-draft-container .ui-grid-row').first().waitFor({ timeout: 10000 }).catch(() => {});
-    const draftTexts = (await inner.locator('#inner-draft-container .ui-grid-row h4').allTextContents().catch(() => []))
-      .map(t => t.trim()).filter(Boolean);
-    if (draftTexts.length) console.log(`  Existing drafts: ${JSON.stringify([...new Set(draftTexts)])}`);
-    const existingDraft = inner.locator('#inner-draft-container .ui-grid-row h4').filter({ hasText: intendedName }).first();
+    const { cell, names } = await findDraftCell(inner, intendedName);
+    if (names.length) console.log(`  Existing drafts: ${JSON.stringify(names)}`);
 
     let draftName, formFields = {}, saveErrors = [];
-    if (await existingDraft.isVisible().catch(() => false)) {
-      console.log(`  Reusing existing draft "${intendedName}" (from a previous run).`);
-      await existingDraft.click();
+    if (cell) {
+      console.log(continuing
+        ? `  Reconnecting to draft "${intendedName}".`
+        : `  Reusing existing draft "${intendedName}" (from a previous run).`);
+      await cell.click();
       draftName = intendedName;
       await new Promise(r => setTimeout(r, 1500));
+    } else if (continuing && filedBefore.length) {
+      // Filing into a fresh draft would split the settlement in two, and the
+      // documents already filed would be in neither the new draft nor this run.
+      throw failure(`The draft "${intendedName}" is no longer among your drafts in indfak2.`, {
+        detail: `${filedBefore.length} document(s) of this settlement were filed into it`
+          + `${prevSettlement.settlement_number ? ` (settlement no. ${prevSettlement.settlement_number})` : ''}. `
+          + `Drafts listed: ${names.join(' · ') || '(none)'}.`,
+        hint: 'If it was sent for approval or deleted in indfak2, the new receipts need a settlement of their own. If it was renamed, give it back the name above and try again.',
+      });
     } else {
+      // No draft yet — or the one the record names is gone with nothing filed
+      // in it, which is as good as never having had one.
+      if (continuing) console.log(`  The draft "${intendedName}" is gone, and nothing was filed in it — creating it again.`);
       const newDraftLink = inner.locator('#inner-draft-container a').first();
       await newDraftLink.click();
       ({ name: draftName, alias: aliasUsed, formFields, saveErrors } = await fillNewDraft(page, inner, {}, {
-        draftName: intendedName,
+        draftName: `* ${settlementName}`,
         alias: alias || undefined,
-        travel: travel || undefined,
+        travel: plannedTravel || undefined,
         docs: docs,
       }));
     }
 
     const settlementNumber = await readSettlementNumber(inner);
     if (settlementNumber) console.log(`  Settlement number: ${settlementNumber}`);
-    return { outer, inner, draftName, formFields, saveErrors, settlementNumber };
+    // Two drafts can share a name; they cannot share a number. Nothing has been
+    // filed yet, so stopping here costs nothing.
+    const recorded = prevSettlement.settlement_number;
+    if (cell && continuing && recorded && settlementNumber && settlementNumber !== recorded) {
+      throw failure(`The draft named "${intendedName}" is settlement no. ${settlementNumber}, not no. ${recorded}.`, {
+        detail: 'Another draft has the same name as this settlement\'s. Nothing was filed into it.',
+        hint: 'Rename or delete the other draft in indfak2, then try again.',
+      });
+    }
+    return { outer, inner, draftName, formFields, saveErrors, settlementNumber, reconnected: !!cell && continuing };
   });
+
+  // A draft reconnected to keeps the header an earlier run gave it — type,
+  // purpose, travel window — and new lines have to fit that window. A draft
+  // made now takes this run's plan.
+  const travel = reconnected ? (prevSettlement.travel || null) : (plannedTravel || null);
+  if (reconnected) aliasUsed = prevSettlement.alias || aliasUsed;
+  const header = reconnected
+    ? {
+        type: prevSettlement.type, purpose: prevSettlement.purpose,
+        form_fields_entered: prevSettlement.form_fields_entered || {},
+        save_errors: prevSettlement.save_errors || [],
+        created_at: prevSettlement.created_at || prev.run_at || runAt,
+      }
+    : {
+        type: travel ? '2 - Travel settlements (days,expenses,transp.)' : EXPENSE_TYPE,
+        purpose: derivePurpose(travel, docs),
+        form_fields_entered: formFields, save_errors: saveErrors, created_at: runAt,
+      };
 
   // Supporting documents are attached to the first expense line that succeeds.
   let pendingSupport = supporting.map(d => ({
@@ -2307,6 +2898,8 @@ async function runFolderInner(page, folderPath, folderName, alias, settlementNam
     description: `Supporting document: ${d.vendor || path.basename(d.filePath, path.extname(d.filePath))}`,
   }));
   let supportAttachedTo = null;
+  // True once the line carrying them has saved and their files have moved.
+  let supportFiled = false;
   const takePendingSupport = hostFile => {
     if (!pendingSupport.length) return [];
     const extras = pendingSupport;
@@ -2315,8 +2908,71 @@ async function runFolderInner(page, folderPath, folderName, alias, settlementNam
     return extras;
   };
 
-  // Process each expense into the draft
   const results = [];
+  const filedThisRun = [];
+  const submitState = { requested: SUBMIT_SETTLEMENT, submitted: false, skipped_reason: null, button: null, errors: [] };
+
+  const supportingNow = () => supporting.map(d => ({
+    file: path.basename(d.filePath),
+    role: 'supporting',
+    plan_reason: d.plan_reason,
+    parsed_invoice: parsedFields(d),
+    attached_to: supportFiled ? supportAttachedTo : null,
+    moved_to_output: supportFiled,
+    run_at: runAt,
+  }));
+
+  // The settlement as it stands right now. `waiting` is read from the folder
+  // rather than worked out: whatever is still in input/ is what the draft is
+  // missing, however it got there.
+  const recordNow = (final = false) => composeRecord(record, {
+    runAt, final, folderName,
+    documents: files.map(f => path.basename(f)),
+    draftName,
+    settlementNumber: settlementNumber || prevSettlement.settlement_number || null,
+    alias: aliasUsed, header, travel,
+    results, supporting: supportingNow(), filed: filedThisRun.slice(),
+    waiting: pendingDocuments(folderPath).map(f => path.basename(f)),
+    submit: submitState, questions: ASK_LOG, claude: claudeRecord(),
+  });
+
+  // Written as soon as there is a draft and again after every document, so a
+  // run that dies part-way leaves a record that matches the draft and the
+  // folder — and the next run carries on from exactly there.
+  const saveRecord = (final = false) => {
+    const file = writeRecord(folderPath, recordNow(final));
+    // Tells the desktop app where the record is — from the first save, so a run
+    // that fails later still leaves its Details something to show.
+    rejsudaiEmit('manifest', { output_folder: folderPath, manifest: file });
+    return file;
+  };
+
+  // A filed document leaves input/. Its line is in the draft by now, so a file
+  // left behind would be filed again by the next run — which is why a move
+  // that fails ends the run rather than being logged and forgotten.
+  const intoProcessed = doc => {
+    const name = path.basename(doc.filePath);
+    try {
+      fs.mkdirSync(processedDir, { recursive: true });
+      moveFile(doc.filePath, path.join(processedDir, name));
+      // HEIC receipts: the JPEG that was actually uploaded goes beside the original.
+      if (doc.converted) {
+        const jpg = uniqueName(path.basename(doc.uploadPath), new Set(fs.readdirSync(processedDir)));
+        fs.writeFileSync(path.join(processedDir, jpg), fs.readFileSync(doc.uploadPath));
+      }
+    } catch (err) {
+      saveRecord();
+      throw failure(`${name} is filed in the draft, but could not be moved to ${PROCESSED_DIR}/.`, {
+        detail: err.message,
+        hint: `Move it into ${path.join(folderName, PROCESSED_DIR)} by hand before running this settlement again.`,
+      });
+    }
+    filedThisRun.push(name);
+  };
+
+  saveRecord();
+
+  // Process each expense into the draft
   // Set when the user answers a failure question with "stop": the index of the
   // document that was being filed, so the rest can be recorded as untouched.
   let stoppedAt = null;
@@ -2328,13 +2984,8 @@ async function runFolderInner(page, folderPath, folderName, alias, settlementNam
       file: path.basename(doc.filePath),
       role: doc.role,
       plan_reason: doc.plan_reason,
-      parsed_invoice: {
-        vendor: doc.vendor, amount: doc.amount,
-        currency: doc.currency, date: doc.date,
-        document_kind: doc.document_kind || null,
-        payment_method: doc.payment_method || null,
-        keywords: doc.keywords || [],
-      },
+      parsed_invoice: parsedFields(doc),
+      run_at: runAt,
     };
 
     // One failing expense must not kill the whole run. The attempt loop is what
@@ -2389,14 +3040,17 @@ async function runFolderInner(page, folderPath, folderName, alias, settlementNam
           if (doc.role === 'unknown_expense') console.log('  No card transaction — falling back to Normal cost.');
           extras = takePendingSupport(docInfo.file);
           const { errors, fields } = await createNormalCostLine(page, inner, doc, doc.uploadPath,
-            { draftName, extraAttachments: extras });
+            { draftName, extraAttachments: extras, travel });
+          // A line that did not save is cancelled, and the supporting documents
+          // uploaded to it with it: they still need a line.
+          if (errors.length && extras.length) { pendingSupport = extras; supportAttachedTo = null; }
           results.push({
             ...docInfo, attempts: attempt, expense_type: 'Normal Cost', matched: false,
             transaction_row: null, fields_entered: fields, errors,
             moved_to_output: errors.length === 0,
           });
         } else {
-          console.log('  ⚠ No match — skipping (left in inbox for retry).');
+          console.log(`  ⚠ No match — skipping (left in ${INPUT_DIR}/ for another run).`);
           results.push({
             ...docInfo, attempts: attempt, expense_type: null, matched: false, transaction_row: null,
             fields_entered: null, errors: [], moved_to_output: false,
@@ -2435,22 +3089,28 @@ async function runFolderInner(page, folderPath, folderName, alias, settlementNam
         done = true;
       }
     }
+
+    // The supporting documents went in with this document's first line. They
+    // count as filed before their files move, so that a move that fails still
+    // leaves a record saying they are in the draft.
+    if (!supportFiled && supportAttachedTo === docInfo.file) {
+      supportFiled = true;
+      for (const d of supporting) intoProcessed(d);
+    }
+    if (results[results.length - 1].moved_to_output) intoProcessed(doc);
+    saveRecord();
     if (stoppedAt !== null) break;
   }
 
   // A run stopped by hand leaves the rest of the folder untouched. Those
   // documents are recorded as unprocessed so the manifest is honest about them,
-  // their files stay in the inbox, and — the part that matters — the submit
-  // gate below sees an incomplete settlement and will not send it.
+  // their files stay in input/, and — the part that matters — the submit gate
+  // below sees an incomplete settlement and will not send it.
   if (stoppedAt !== null) {
     for (const doc of expenses.slice(stoppedAt + 1)) {
       results.push({
         file: path.basename(doc.filePath), role: doc.role, plan_reason: doc.plan_reason,
-        parsed_invoice: {
-          vendor: doc.vendor, amount: doc.amount, currency: doc.currency, date: doc.date,
-          document_kind: doc.document_kind || null, payment_method: doc.payment_method || null,
-          keywords: doc.keywords || [],
-        },
+        parsed_invoice: parsedFields(doc), run_at: runAt,
         expense_type: null, matched: false, transaction_row: null, fields_entered: null,
         errors: ['Not attempted — the run was stopped.'], moved_to_output: false,
       });
@@ -2459,11 +3119,11 @@ async function runFolderInner(page, folderPath, folderName, alias, settlementNam
   }
 
   // A document that was left out at the reading stage never reached the loop,
-  // so nothing above has recorded it. It belongs in the manifest, and in the
-  // count that keeps an incomplete settlement from being sent for approval.
+  // so nothing above has recorded it. It belongs in the manifest, and it is
+  // still in input/, which keeps an incomplete settlement from being sent.
   for (const file of unread) {
     results.push({
-      file, role: null, plan_reason: null, parsed_invoice: null,
+      file, role: null, plan_reason: null, parsed_invoice: null, run_at: runAt,
       expense_type: null, matched: false, transaction_row: null, fields_entered: null,
       errors: ['Could not be read — left out of the settlement.'], moved_to_output: false,
     });
@@ -2471,19 +3131,18 @@ async function runFolderInner(page, folderPath, folderName, alias, settlementNam
 
   const allocatedCount = results.filter(r => r.moved_to_output).length;
   const unmatchedCount = results.filter(r => !r.moved_to_output).length;
-  console.log(`\n✓ Draft "${draftName}" complete: ${allocatedCount} line(s) created, ${unmatchedCount} unprocessed.`);
+  console.log(`\n✓ Draft "${draftName}": ${allocatedCount} line(s) created this run, ${unmatchedCount} unprocessed.`);
   if (pendingSupport.length) console.log(`  ⚠ Supporting document(s) NOT attached (no expense line succeeded): ${pendingSupport.map(s => s.file).join(', ')}`);
 
   // Submit, if this run asked for it. A settlement that is missing documents is
-  // worse to send than to leave as a draft, so anything unfiled blocks it — the
-  // user fixes the folder and re-runs rather than chasing a half-sent claim
-  // through the approval queue.
-  const submitState = { requested: SUBMIT_SETTLEMENT, submitted: false, skipped_reason: null, button: null, errors: [] };
+  // worse to send than to leave as a draft, so anything unfiled blocks it — and
+  // the whole settlement counts, not just this run: whatever is still in input/
+  // is missing from the draft, however it got there.
   if (SUBMIT_SETTLEMENT) {
+    const { invoices, settlement: { documents_waiting: waiting } } = recordNow();
     const blockers = [];
-    if (allocatedCount === 0) blockers.push('no expense line was created');
-    if (unmatchedCount > 0) blockers.push(`${unmatchedCount} document(s) not filed`);
-    if (pendingSupport.length) blockers.push(`${pendingSupport.length} supporting document(s) not attached`);
+    if (!invoices.some(i => i.moved_to_output)) blockers.push('no expense line has been filed');
+    if (waiting.length) blockers.push(`${waiting.length} document(s) not filed (${waiting.join(', ')})`);
     if (blockers.length) {
       submitState.skipped_reason = blockers.join('; ');
       console.log(`  Not submitting — ${submitState.skipped_reason}. Left as a draft to fix and re-run.`);
@@ -2502,81 +3161,10 @@ async function runFolderInner(page, folderPath, folderName, alias, settlementNam
     ? '  Status: SUBMITTED (sent for approval)'
     : '  Status: DRAFT (not submitted — please review and submit manually)');
 
-  // Build output folder name: YYYYMMDD-HHMMSS[-settlementNumber]
-  const now = new Date();
-  const ts  = `${now.getFullYear()}${String(now.getMonth()+1).padStart(2,'0')}${String(now.getDate()).padStart(2,'0')}-${String(now.getHours()).padStart(2,'0')}${String(now.getMinutes()).padStart(2,'0')}${String(now.getSeconds()).padStart(2,'0')}`;
-  const outputFolderName = settlementNumber ? `${ts}-${settlementNumber}` : ts;
-  const outputFolderPath = path.join(CLAIMS_OUTPUT, outputFolderName);
-  fs.mkdirSync(outputFolderPath, { recursive: true });
-
-  const supportingResults = supporting.map(d => ({
-    file: path.basename(d.filePath),
-    plan_reason: d.plan_reason,
-    attached_to: supportAttachedTo,
-    moved_to_output: !!supportAttachedTo,
-  }));
-
-  // Write manifest inside the output folder
-  const manifest = {
-    run_at: new Date().toISOString(), mode: 'folder',
-    settlement: {
-      draft_name: draftName,
-      settlement_number: settlementNumber || null,
-      original_folder: folderName,
-      alias: aliasUsed,
-      type: travel ? '2 - Travel settlements (days,expenses,transp.)' : EXPENSE_TYPE,
-      purpose: derivePurpose(travel, docs),
-      travel: travel || null,
-      form_fields_entered: formFields,
-      save_errors: saveErrors,
-      expenses_total: results.length,
-      expenses_card: results.filter(r => r.expense_type === 'From Card Transaction' && r.moved_to_output).length,
-      expenses_normal_cost: results.filter(r => r.expense_type === 'Normal Cost' && r.moved_to_output).length,
-      expenses_unprocessed: unmatchedCount,
-      submit: submitState,
-      // What a person was asked during this run, and what they answered — so a
-      // settlement someone steered by hand says so on the record.
-      questions: ASK_LOG,
-      status: submitState.submitted
-        ? 'SUBMITTED — sent for approval'
-        : SUBMIT_SETTLEMENT
-          ? `DRAFT — submit was requested but did not happen (${submitState.skipped_reason || submitState.errors.join(' | ')})`
-          : 'DRAFT — not submitted, review and submit manually',
-    },
-    invoices: results,
-    supporting_documents: supportingResults,
-  };
-  fs.writeFileSync(path.join(outputFolderPath, 'manifest.json'), JSON.stringify(manifest, null, 2));
-  // Tell the desktop app exactly where the results landed (it reads the
-  // manifest for the per-settlement result view and the "open folder" button).
-  rejsudaiEmit('manifest', { output_folder: outputFolderPath, manifest: path.join(outputFolderPath, 'manifest.json') });
-
-  // Move only the PROCESSED files into the output folder — a file in
-  // claims-output means it actually made it into the settlement. Unprocessed
-  // files stay in the inbox folder so a later run can retry them.
-  // Use readFileSync+writeFileSync instead of copyFileSync — the latter uses a
-  // kernel copyfile(2) syscall that fails with ENOTSUP on some network mounts.
-  const processedFiles = new Set([
-    ...results.filter(r => r.moved_to_output).map(r => r.file),
-    ...supportingResults.filter(s => s.moved_to_output).map(s => s.file),
-  ]);
-  for (const doc of docs) {
-    if (!processedFiles.has(path.basename(doc.filePath))) continue;
-    fs.writeFileSync(path.join(outputFolderPath, path.basename(doc.filePath)), fs.readFileSync(doc.filePath));
-    // HEIC receipts: also keep the converted JPEG that was actually uploaded
-    if (doc.converted) {
-      fs.writeFileSync(path.join(outputFolderPath, path.basename(doc.uploadPath)), fs.readFileSync(doc.uploadPath));
-    }
-    fs.unlinkSync(doc.filePath);
-  }
-  const leftover = docs.filter(d => !processedFiles.has(path.basename(d.filePath)));
-  if (leftover.length === 0) {
-    fs.rmSync(folderPath, { recursive: true, force: true });
-  } else {
-    console.log(`  ${leftover.length} unprocessed file(s) left in ${folderPath} for retry.`);
-  }
-
-  console.log(`  Output: ${outputFolderPath}`);
+  const recordPath = saveRecord(true);
+  const waiting = pendingDocuments(folderPath).map(f => path.basename(f));
+  if (waiting.length) console.log(`  ${waiting.length} document(s) still in ${INPUT_DIR}/ for another run: ${waiting.join(', ')}`);
+  console.log(`  Record: ${recordPath}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -2588,6 +3176,8 @@ async function run() {
   if (!arg) {
     console.error('Usage: node bot.js <invoice-file> [--submit|--no-submit]');
     console.error('       node bot.js <folder>          e.g. ai_subscription_fees');
+    console.error('  A folder files what is waiting in its input/ (or loose inside it) into the');
+    console.error('  settlement\'s draft; add receipts to input/ and run it again to continue.');
     console.error('  --submit     send the settlement for approval when everything filed cleanly');
     console.error('  --no-submit  leave it as a draft even if REJSUDAI_SUBMIT=1 (the default)');
     process.exit(1);
@@ -2596,6 +3186,9 @@ async function run() {
 
   const targetPath = path.isAbsolute(arg) ? arg : path.join(RECEIPTS_INBOX, arg);
   const isFolder   = fs.existsSync(targetPath) && fs.statSync(targetPath).isDirectory();
+  // A folder with nothing to file, or one already sent for approval, is turned
+  // away before a browser is started and a login spent on it.
+  if (isFolder) checkFolder(targetPath);
 
   // Visible browser stays the default (REJSUDAI_HEADLESS unset === headless:false),
   // so CLI behaviour is unchanged; the desktop app's Settings toggle sets it to 1.
@@ -2639,6 +3232,7 @@ async function run() {
     await reportFailure(page, err);
     throw err;
   } finally {
+    printClaudeTotals();
     if (stopScreencast) await stopScreencast();
     BROWSER_WINDOW = null;
     await browser.close();
@@ -2657,7 +3251,11 @@ if (require.main === module) {
   });
 }
 
-module.exports = { readSettlementMeta, prepareFile, parseInvoice, planSettlement, login, openExpenseModule,
+module.exports = { readSettlementMeta, prepareFile, parseInvoice, planSettlement, planPrompt,
+                   callClaude, claudeCost, claudeRecord, mergeClaude,
+                   CLAUDE_LOG, login, openExpenseModule,
+                   INPUT_DIR, PROCESSED_DIR, RECORD_FILE, pendingDocuments, readRecord, writeRecord,
+                   filedEntries, claimFileNames, checkFolder, composeRecord, sameDraftName, runFolder,
                    setStep, failure, describeFailure, reportFailure,
                    askUser, askForOTP, askAboutFailure, askAfterExpenseFailure, askAboutAlias,
                    runStage, STAGE_SKIPPED,

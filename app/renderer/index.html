@@ -19,7 +19,8 @@
       <button class="tab" data-view="settings" role="tab">Settings</button>
     </div>
     <div class="titlebar-right">
-      <span id="browser-badge" class="badge" hidden></span>
+      <button id="update-badge" class="badge badge-update badge-action" type="button" hidden></button>
+      <button id="browser-badge" class="badge badge-action" type="button" hidden></button>
     </div>
   </header>
 
@@ -49,7 +50,7 @@
 
       <ul id="settlement-list" class="settlements"></ul>
       <p id="empty-state" class="empty" hidden>
-        No pending settlements.<br />
+        No settlements yet.<br />
         <span class="subtle">Press “Create settlement” to put one together.</span>
       </p>
     </section>
@@ -81,7 +82,7 @@
           <div class="details-head">
             <h3 id="details-title">Details</h3>
             <div class="head-actions">
-              <button id="details-open-folder" class="btn btn-quiet">Open output folder</button>
+              <button id="details-open-folder" class="btn btn-quiet">Open folder</button>
               <button id="details-open-manifest" class="btn btn-quiet">manifest.json</button>
             </div>
           </div>
@@ -112,7 +113,7 @@
         <div class="new-head">
           <div>
             <h2>New settlement</h2>
-            <p class="subtle">Prepares the settlement folder in your receipts inbox and files it into indfak2 straight away.</p>
+            <p class="subtle">Prepares the settlement's folder and files it into indfak2 straight away. Receipts you find later can be added to it from the list.</p>
           </div>
           <button id="btn-new-back" class="btn btn-quiet">← Settlements</button>
         </div>
@@ -183,7 +184,7 @@
           <button id="btn-new-cancel" class="btn btn-quiet">Cancel</button>
           <span id="new-msg" class="msg"></span>
         </div>
-        <p class="hint">Receipts are copied into the inbox folder — your originals stay where they are.
+        <p class="hint">Receipts are copied into the settlement's folder — your originals stay where they are.
           Saving keeps the settlement in the list to process later; running files it now.</p>
       </section>
     </div>
@@ -275,11 +276,15 @@
       <section class="card">
         <h2>Folders</h2>
         <div class="field">
-          <label for="s-output">Claims output</label>
+          <label for="s-settlements">Settlements</label>
           <div class="field-row">
-            <input id="s-output" type="text" spellcheck="false" class="mono" />
-            <button class="btn btn-quiet" data-pick="s-output" data-pick-title="Choose the claims output folder">Choose…</button>
+            <input id="s-settlements" type="text" spellcheck="false" class="mono" readonly />
+            <button id="btn-open-settlements" class="btn btn-quiet">Open</button>
           </div>
+          <p class="hint">Each settlement is a folder in here, kept for as long as you keep the settlement:
+            <span class="mono">input/</span> holds the receipts waiting to be filed,
+            <span class="mono">processed/</span> the ones already in the indfak2 draft, and
+            <span class="mono">manifest.json</span> the record of what went where.</p>
         </div>
       </section>
 
